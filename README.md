@@ -23,14 +23,22 @@ pip install -e .
 ### 1) 启动 GUI 编辑器
 
 ```bash
-python -m cs_caller.cli gui --image /absolute/path/to/minimap.png --map de_dust2
+python -m cs_caller.cli gui --source-mode mock --image /absolute/path/to/minimap.png --map de_dust2
 ```
 
 常用参数：
 
+- `--source-mode`：`mock|ndi|capture`
+- `--source`：在 `ndi/capture` 模式下指定源（例：`ndi://OBS`、`0`、`rtsp://...`）
 - `--maps-dir`：地图 YAML 目录（默认 `config/maps`）
 - `--fps`：预览帧率（默认 `16`）
 - `--tts-backend`：`auto|pyttsx3|console`
+
+NDI 示例：
+
+```bash
+python -m cs_caller.cli gui --source-mode ndi --source "ndi://OBS"
+```
 
 编辑器中可完成：
 

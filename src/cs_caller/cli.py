@@ -33,7 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     gui = sub.add_parser("gui", help="启动可视化区域编辑器")
-    gui.add_argument("--image", required=True, help="本地小地图图片绝对路径")
+    gui.add_argument("--image", default=None, help="本地小地图图片绝对路径（mock 模式）")
+    gui.add_argument(
+        "--source-mode",
+        default="mock",
+        choices=["mock", "ndi", "capture"],
+        help="视频源模式：mock图片 / ndi流 / 通用capture",
+    )
+    gui.add_argument("--source", default=None, help="ndi/capture 模式下的视频源")
     gui.add_argument("--map", default="de_dust2", help="默认加载地图名")
     gui.add_argument("--maps-dir", default="config/maps", help="地图 YAML 目录")
     gui.add_argument("--fps", type=float, default=16.0, help="预览帧率")
@@ -83,9 +90,23 @@ def run_mock(args: argparse.Namespace) -> None:
 
 def run_gui(args: argparse.Namespace) -> None:
     from cs_caller.gui.app import run_region_editor
+    from cs_caller.sources.base import NDISource, OpenCVCaptureSource
     from cs_caller.sources.mock_source import MockImageSource
 
-    source = MockImageSource(args.image)
+    if args.source_mode == "mock":
+        if not args.image:
+            raise ValueError("mock 模式需要 --image")
+        source = MockImageSource(args.image)
+    elif args.source_mode == "ndi":
+        if not args.source:
+            raise ValueError("ndi 模式需要 --source（例如 ndi://OBS）")
+        source = NDISource(args.source)
+    else:
+        if args.source is None:
+            raise ValueError("capture 模式需要 --source（摄像头编号/视频路径/流地址）")
+        cap_source: str | int = int(args.source) if str(args.source).isdigit() else args.source
+        source = OpenCVCaptureSource(cap_source)
+
     run_region_editor(
         source=source,
         maps_dir=args.maps_dir,

@@ -54,8 +54,15 @@ class RegionEditorApp:
         self._last_callout: str | None = None
 
         self._build_layout()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_map_list()
         self._try_load(initial_map)
+
+    def _on_close(self) -> None:
+        close = getattr(self.source, "close", None)
+        if callable(close):
+            close()
+        self.root.destroy()
 
     def _build_layout(self) -> None:
         top = ttk.Frame(self.root, padding=8)
