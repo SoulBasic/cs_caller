@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs-caller"
+version = "0.1.0"
+description = "CS minimap callout prototype"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "cs_caller" }
+]
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python>=4.10",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+cs-caller = "cs_caller.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
