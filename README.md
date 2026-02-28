@@ -2,7 +2,7 @@
 
 一个用于验证 CS 小地图报点流程的原型项目，当前包含：
 
-1. 帧源抽象（Mock 图片帧源 + NDI/OpenCV capture）。
+1. 帧源抽象（Mock 图片帧源 + 原生 NDI 接收 + OpenCV capture）。
 2. OpenCV HSV 红点检测。
 3. 用户定义区域映射（当前以拖拽矩形生成为多边形）。
 4. TTS 播报（`pyttsx3` 优先，失败自动回退到控制台输出）。
@@ -18,6 +18,12 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+NDI 模式额外依赖：
+
+```bash
+pip install ndi-python
+```
+
 ## CLI 用法
 
 ### 0) 严格 2 步快速开跑（推荐）
@@ -31,6 +37,7 @@ python -m cs_caller.cli gui --source-mode ndi --map de_dust2
 
 说明：
 - `ndi` 模式下如果源留空，GUI 会自动填 `ndi://OBS`。
+- `ndi` 源输入支持三种写法：`OBS`、`ndi://OBS`、完整源名（如 `OBS Studio (DESKTOP-XXX)`）。
 - 连接成功后会自动开启检测与语音播报；如只想看画面可点“仅预览”。
 
 ### 1) 启动 GUI 编辑器
@@ -42,16 +49,16 @@ python -m cs_caller.cli gui --source-mode mock --image /absolute/path/to/minimap
 常用参数：
 
 - `--source-mode`：`mock|ndi|capture`
-- `--source`：在 `ndi/capture` 模式下指定源（例：`ndi://OBS`、`0`、`rtsp://...`）
+- `--source`：在 `ndi/capture` 模式下指定源（例：`OBS`、`ndi://OBS`、`OBS Studio (DESKTOP-XXX)`、`0`、`rtsp://...`）
 - `--maps-dir`：地图 YAML 目录（默认 `config/maps`）
 - `--fps`：预览帧率（默认 `16`）
 - `--tts-backend`：`auto|pyttsx3|console`
 - `--settings-path`：运行设置文件（默认 `config/app_settings.yaml`）
 
-NDI 示例：
+NDI 示例（原生接收，不走 `cv2.VideoCapture`）：
 
 ```bash
-python -m cs_caller.cli gui --source-mode ndi --source "ndi://OBS"
+python -m cs_caller.cli gui --source-mode ndi --source "OBS"
 ```
 
 编辑器中可完成：
@@ -117,6 +124,18 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+3. 安装原生 NDI Python 绑定：
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install ndi-python
+```
+
+4. 安装 NDI Runtime（必须）：
+   - 打开 `https://ndi.video/tools/ndi-core-suite/`
+   - 下载并安装 NDI Runtime/Core Suite（x64）
+   - 安装完成后重启终端，再执行 GUI
+
 ### 启动 GUI 编辑器
 
 ```powershell
@@ -142,8 +161,9 @@ python -m cs_caller.cli gui --source-mode ndi --map de_dust2
 
 GUI 打开后点“连接并开始播报”即可：
 - `ndi` 源留空会自动填 `ndi://OBS`；
+- 也可直接填 `OBS` 或完整源名，程序会做不区分大小写的精确/包含匹配；
 - 状态为“已连接”即成功拉流；
-- 若失败，错误横幅会提示原因，此时可直接把模式切到 `mock` 并填入本地图片路径，再点“重连源”，无需重启程序。
+- 若失败，错误横幅会提示原因，并显示“当前发现的 NDI 源数量与名称”；此时可直接把模式切到 `mock` 并填入本地图片路径，再点“重连源”，无需重启程序。
 
 备注：
 - 程序为单进程架构，NDI 失败不会导致 GUI 退出。
@@ -153,7 +173,7 @@ GUI 打开后点“连接并开始播报”即可：
 
 | 现象 | 快速定位 | 精确处理 |
 | --- | --- | --- |
-| 打不开流（连接失败） | GUI 顶部“视频源连接”状态为“连接失败”且有红色横幅 | 1) 确认 OBS `工具 -> NDI 输出设置` 已开启主输出；2) `source` 用 `ndi://OBS` 这类格式并与 OBS 源名一致；3) 安装 NDI Runtime 后重开 GUI 再连。 |
+| 打不开流（连接失败） | GUI 顶部“视频源连接”状态为“连接失败”且有红色横幅 | 1) 确认 OBS `工具 -> NDI 输出设置` 已开启主输出；2) `source` 可填 `OBS` / `ndi://OBS` / 完整源名；3) 对照横幅里“发现 N 个源: ...”修正输入；4) 按预检提示安装 `ndi-python` 与 NDI Runtime。 |
 | 无画面（连上但黑屏/卡住） | 状态为“已连接”但画布无更新，或出现“读取异常” | 1) OBS 先确认推流画面在动；2) 检查防火墙/局域网连通；3) 点“重连源”；4) 仍失败先切 `mock` 验证检测链路。 |
 | 有画面不播报 | 画布有画面，但无“检测到: xxx”覆盖文本或无语音 | 1) 勾选“运行检测并播报”；2) 检查区域是否覆盖红点位置并已保存地图；3) 切换 `--tts-backend console` 验证是否仅 TTS 后端问题。 |
 
@@ -181,6 +201,7 @@ cs_caller/
       app.py
     sources/
       base.py
+      ndi_native.py
       mock_source.py
     tts/
       base.py

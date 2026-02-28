@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from cs_caller.preflight import check_ndi_runtime_available
-from cs_caller.sources.base import FrameSource, NDISource, OpenCVCaptureSource
+from cs_caller.preflight import check_ndi_python_module_available, check_ndi_runtime_available
+from cs_caller.sources.base import FrameSource, OpenCVCaptureSource
 from cs_caller.sources.mock_source import MockImageSource
+from cs_caller.sources.ndi_native import NDISource
 
 
 class SourceFactoryError(ValueError):
@@ -40,13 +41,19 @@ def build_source(mode: str, source_text: str) -> FrameSource:
         if not source:
             raise SourceFactoryError(
                 code="empty_source",
-                message="ndi 模式需要源文本（示例: ndi://OBS）",
+                message="ndi 模式需要源文本（示例: OBS 或 ndi://OBS）",
+            )
+        module_ok, module_hint = check_ndi_python_module_available()
+        if not module_ok:
+            raise SourceFactoryError(
+                code="ndi_python_missing",
+                message=module_hint,
             )
         runtime_ok, runtime_hint = check_ndi_runtime_available()
         if not runtime_ok:
             raise SourceFactoryError(
                 code="ndi_runtime_missing",
-                message=f"未检测到 NDI Runtime：{runtime_hint}",
+                message=runtime_hint,
             )
         try:
             return NDISource(source)
@@ -97,6 +104,7 @@ def map_source_factory_error(exc: Exception, *, mode: str) -> str:
             "empty_source": "源输入为空",
             "bad_mode": "模式错误",
             "capture_index_invalid": "采集编号错误",
+            "ndi_python_missing": "ndi-python 缺失",
             "ndi_runtime_missing": "NDI 运行库缺失",
             "ndi_connect_failed": "NDI 连接失败",
             "capture_open_failed": "采集源打开失败",

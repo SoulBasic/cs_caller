@@ -603,9 +603,12 @@ class RegionEditorApp:
             self.preflight_var.set("预检: 通过")
 
         if mode == "ndi":
+            ndi_module_item = next((it for it in report.items if it.key == "ndi_python_module"), None)
             ndi_runtime_item = next((it for it in report.items if it.key == "ndi_runtime"), None)
             if self._source is not None:
                 self.quick_step_obs_var.set("1. OBS 开 NDI: 已完成")
+            elif ndi_module_item is not None and not ndi_module_item.ok:
+                self.quick_step_obs_var.set("1. OBS 开 NDI: 未完成（ndi-python 未安装）")
             elif ndi_runtime_item is not None and not ndi_runtime_item.ok:
                 self.quick_step_obs_var.set("1. OBS 开 NDI: 未完成（NDI Runtime 缺失）")
             else:

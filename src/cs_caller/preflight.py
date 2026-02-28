@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import ctypes.util
+import importlib
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
+WINDOWS_NDI_PYTHON_INSTALL_GUIDE = (
+    "未安装 ndi-python。Windows 安装步骤："
+    "1) 进入项目目录并激活虚拟环境：.\\.venv\\Scripts\\Activate.ps1；"
+    "2) 升级 pip：python -m pip install --upgrade pip；"
+    "3) 安装 NDI Python 绑定：python -m pip install ndi-python。"
+)
+
+WINDOWS_NDI_RUNTIME_INSTALL_GUIDE = (
+    "未检测到 NDI Runtime。Windows 安装步骤："
+    "1) 打开 https://ndi.video/tools/ndi-core-suite/ 下载并安装 NDI Runtime/Core Suite；"
+    "2) 安装后重启终端/GUI；"
+    "3) 如仍失败，确认存在目录 C:\\Program Files\\NDI\\NDI 6 Runtime\\v6。"
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +57,7 @@ class PreflightReport:
 
 def check_ndi_runtime_available(
     *,
+    import_module: Callable[[str], Any] = importlib.import_module,
     find_library: Callable[[str], str | None] | None = None,
     path_exists: Callable[[str], bool] = os.path.exists,
     env: dict[str, str] | None = None,
@@ -53,6 +69,17 @@ def check_ndi_runtime_available(
 
     finder = find_library or ctypes.util.find_library
     env_vars = env or dict(os.environ)
+
+    # 优先通过 NDIlib 初始化探测（最接近实际运行可用性）
+    try:
+        ndi = import_module("NDIlib")
+        initialize = getattr(ndi, "initialize", None)
+        if callable(initialize):
+            if bool(initialize()):
+                return True, "已通过 NDIlib.initialize() 验证 Runtime 可用"
+            return False, WINDOWS_NDI_RUNTIME_INSTALL_GUIDE
+    except Exception:
+        pass
 
     for lib_name in ("ndi", "ndi.6", "ndi.5", "Processing.NDI.Lib.x64"):
         if finder(lib_name):
@@ -75,13 +102,27 @@ def check_ndi_runtime_available(
         if path_exists(dll_path):
             return True, f"检测到 NDI 库文件: {dll_path}"
 
-    return False, "未检测到 NDI Runtime（请先安装 NewTek/NDI Runtime）"
+    return False, WINDOWS_NDI_RUNTIME_INSTALL_GUIDE
+
+
+def check_ndi_python_module_available(
+    *,
+    import_module: Callable[[str], Any] = importlib.import_module,
+) -> tuple[bool, str]:
+    """检查 ndi-python（NDIlib）模块可导入。"""
+
+    try:
+        import_module("NDIlib")
+        return True, "已检测到 ndi-python 模块（NDIlib）"
+    except Exception:
+        return False, WINDOWS_NDI_PYTHON_INSTALL_GUIDE
 
 
 def collect_preflight_report(
     mode: str,
     source_text: str,
     *,
+    ndi_module_checker: Callable[[], tuple[bool, str]] | None = None,
     ndi_runtime_checker: Callable[[], tuple[bool, str]] | None = None,
     path_exists: Callable[[Path], bool] = lambda p: p.exists(),
 ) -> PreflightReport:
@@ -134,8 +175,20 @@ def collect_preflight_report(
             )
 
     if normalized_mode == "ndi":
-        checker = ndi_runtime_checker or check_ndi_runtime_available
-        runtime_ok, runtime_detail = checker()
+        module_checker = ndi_module_checker or check_ndi_python_module_available
+        module_ok, module_detail = module_checker()
+        items.append(
+            PreflightItem(
+                key="ndi_python_module",
+                label="ndi-python 模块",
+                ok=module_ok,
+                detail=module_detail,
+                blocking=True,
+            )
+        )
+
+        runtime_checker = ndi_runtime_checker or check_ndi_runtime_available
+        runtime_ok, runtime_detail = runtime_checker()
         items.append(
             PreflightItem(
                 key="ndi_runtime",
@@ -146,13 +199,18 @@ def collect_preflight_report(
             )
         )
         if has_source:
-            ndi_format_ok = source.startswith("ndi://")
+            normalized = source[6:].strip() if source.lower().startswith("ndi://") else source
+            ndi_format_ok = bool(normalized)
             items.append(
                 PreflightItem(
                     key="ndi_source_format",
-                    label="NDI 源格式",
+                    label="NDI 源解析",
                     ok=ndi_format_ok,
-                    detail="源格式正确" if ndi_format_ok else "建议使用 ndi://<源名>（如 ndi://OBS）",
+                    detail=(
+                        f"将按源名匹配: {normalized}"
+                        if ndi_format_ok
+                        else "源名为空，请填写 OBS / ndi://OBS / 完整源名"
+                    ),
                     blocking=False,
                 )
             )

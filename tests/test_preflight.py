@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from cs_caller.preflight import check_ndi_runtime_available, collect_preflight_report
+from cs_caller.preflight import (
+    check_ndi_python_module_available,
+    check_ndi_runtime_available,
+    collect_preflight_report,
+)
 
 
 def test_check_ndi_runtime_available_detects_by_library() -> None:
@@ -17,12 +21,33 @@ def test_collect_preflight_report_ndi_runtime_missing() -> None:
     report = collect_preflight_report(
         mode="ndi",
         source_text="ndi://OBS",
+        ndi_module_checker=lambda: (True, "模块已安装"),
         ndi_runtime_checker=lambda: (False, "未检测到 NDI Runtime"),
     )
 
     assert report.has_blocking_error is True
     assert any(item.key == "ndi_runtime" and (not item.ok) for item in report.items)
     assert "未检测到 NDI Runtime" in "\n".join(report.hints)
+
+
+def test_collect_preflight_report_ndi_python_missing_is_blocking() -> None:
+    report = collect_preflight_report(
+        mode="ndi",
+        source_text="ndi://OBS",
+        ndi_module_checker=lambda: (False, "未安装 ndi-python"),
+        ndi_runtime_checker=lambda: (True, "runtime ok"),
+    )
+
+    assert report.has_blocking_error is True
+    item = next(it for it in report.items if it.key == "ndi_python_module")
+    assert item.ok is False
+    assert "ndi-python" in item.detail
+
+
+def test_check_ndi_python_module_available_missing() -> None:
+    ok, detail = check_ndi_python_module_available(import_module=lambda _: (_ for _ in ()).throw(ImportError()))
+    assert ok is False
+    assert "ndi-python" in detail
 
 
 def test_collect_preflight_report_capture_negative_index_is_blocking() -> None:
