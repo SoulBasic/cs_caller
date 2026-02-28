@@ -14,16 +14,15 @@ from cs_caller.app_settings import AppSettings, AppSettingsStore
 from cs_caller.callout_mapper import CalloutMapper, Region
 from cs_caller.detector import RedDotDetector
 from cs_caller.map_config_store import MapConfig, MapConfigStore
+from cs_caller.preflight import PreflightReport, collect_preflight_report
 from cs_caller.region_editor import build_rect_region, normalize_rect, polygon_to_rect
+from cs_caller.source_factory import build_source, map_source_factory_error
 from cs_caller.sources.base import (
     FrameSource,
-    NDISource,
-    OpenCVCaptureSource,
     SourceConnectError,
     SourceError,
     SourceReadError,
 )
-from cs_caller.sources.mock_source import MockImageSource
 from cs_caller.tts import create_tts
 
 
@@ -57,6 +56,10 @@ class RegionEditorApp:
         self.source_status_var = tk.StringVar(value="未连接（请填写源并点击连接）")
         self.source_button_text_var = tk.StringVar(value="连接源")
         self.error_banner_var = tk.StringVar(value="")
+        self.preflight_var = tk.StringVar(value="预检: 待检查")
+        self.quick_step_obs_var = tk.StringVar(value="1. OBS 开 NDI: 待检查")
+        self.quick_step_source_var = tk.StringVar(value="2. 输入源: 待检查")
+        self.quick_step_connect_var = tk.StringVar(value="3. 点击连接: 待连接")
         self.tts_backend_var = tk.StringVar(value=tts_backend)
 
         self._regions: list[Region] = []
@@ -73,8 +76,11 @@ class RegionEditorApp:
         self._last_callout: str | None = None
         self._consecutive_read_failures = 0
         self._read_failure_disconnect_threshold = 3
+        self._last_connect_error: str = ""
+        self._preflight_report: PreflightReport | None = None
 
         self._build_layout()
+        self.source_text_var.trace_add("write", self._on_source_text_change)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_map_list()
         self._try_load(initial_map)
@@ -149,6 +155,15 @@ class RegionEditorApp:
         ).pack(side=tk.LEFT)
 
         ttk.Label(source_frame, textvariable=self.source_status_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        quick_start = ttk.LabelFrame(self.root, text="快速开始（单进程 OBS-NDI）", padding=8)
+        quick_start.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ttk.Label(quick_start, textvariable=self.quick_step_obs_var).pack(anchor=tk.W)
+        ttk.Label(quick_start, textvariable=self.quick_step_source_var).pack(anchor=tk.W)
+        ttk.Label(quick_start, textvariable=self.quick_step_connect_var).pack(anchor=tk.W)
+        ttk.Label(quick_start, textvariable=self.preflight_var, foreground="#37474f").pack(
+            anchor=tk.W, pady=(4, 0)
+        )
 
         self.error_banner = tk.Label(
             self.root,
@@ -460,10 +475,15 @@ class RegionEditorApp:
         self.source_button_text_var.set("连接源")
         self.status_var.set("已切换源模式，点击“连接源”后生效")
         self._clear_error_banner()
+        self._last_connect_error = ""
+        self._refresh_preflight_and_quickstart()
         self._persist_settings()
 
     def _on_source_entry_enter(self, _: tk.Event[tk.Misc]) -> None:
         self._connect_source()
+
+    def _on_source_text_change(self, *_: object) -> None:
+        self._refresh_preflight_and_quickstart()
 
     def _connect_source(self, auto: bool = False) -> None:
         mode = self.source_mode_var.get().strip().lower()
@@ -477,22 +497,26 @@ class RegionEditorApp:
             return
 
         try:
-            self._source = _build_source(mode, source_text)
+            self._source = build_source(mode, source_text)
         except Exception as exc:
             self._source = None
             self.source_status_var.set("连接失败")
             self.source_button_text_var.set("重连源")
-            message = f"[{mode}] 连接失败: {exc}"
+            message = map_source_factory_error(exc, mode=mode)
+            self._last_connect_error = message
             self._show_error_banner(message)
+            self._refresh_preflight_and_quickstart()
             if not auto:
                 self.status_var.set("源连接失败，请修正参数后重试")
             return
 
         self._consecutive_read_failures = 0
+        self._last_connect_error = ""
         self.source_status_var.set(f"已连接: {mode} / {source_text or '-'}")
         self.source_button_text_var.set("重连源")
         self._clear_error_banner()
         self.status_var.set("源连接成功")
+        self._refresh_preflight_and_quickstart()
         self._persist_settings()
 
     def _close_source(self) -> None:
@@ -521,8 +545,50 @@ class RegionEditorApp:
         self._close_source()
         self.source_status_var.set("已断开")
         self.source_button_text_var.set("重连源")
+        self._last_connect_error = message
         self._show_error_banner(message)
         self.status_var.set("源不可用，可切换到 mock 并重连")
+        self._refresh_preflight_and_quickstart()
+
+    def _refresh_preflight_and_quickstart(self) -> None:
+        mode = self.source_mode_var.get().strip().lower()
+        source_text = self.source_text_var.get().strip()
+        report = collect_preflight_report(mode, source_text)
+        self._preflight_report = report
+
+        hints = report.hints
+        if hints:
+            self.preflight_var.set(f"预检: {hints[0]}")
+        else:
+            self.preflight_var.set("预检: 通过")
+
+        if mode == "ndi":
+            ndi_runtime_item = next((it for it in report.items if it.key == "ndi_runtime"), None)
+            if self._source is not None:
+                self.quick_step_obs_var.set("1. OBS 开 NDI: 已完成")
+            elif ndi_runtime_item is not None and not ndi_runtime_item.ok:
+                self.quick_step_obs_var.set("1. OBS 开 NDI: 未完成（NDI Runtime 缺失）")
+            else:
+                self.quick_step_obs_var.set("1. OBS 开 NDI: 待完成（OBS 工具 -> NDI 输出设置）")
+        else:
+            self.quick_step_obs_var.set("1. OBS 开 NDI: 当前模式可跳过")
+
+        source_item = next((it for it in report.items if it.key == "source_present"), None)
+        source_ok = bool(source_item and source_item.ok)
+        capture_item = next((it for it in report.items if it.key == "capture_index_valid"), None)
+        capture_ok = capture_item is None or capture_item.ok
+        if source_ok and capture_ok:
+            self.quick_step_source_var.set("2. 输入源: 已完成")
+        else:
+            detail = source_item.detail if source_item is not None else "请填写源"
+            self.quick_step_source_var.set(f"2. 输入源: 未完成（{detail}）")
+
+        if self._source is not None:
+            self.quick_step_connect_var.set("3. 点击连接: 已完成")
+        elif self._last_connect_error:
+            self.quick_step_connect_var.set(f"3. 点击连接: 失败（{self._last_connect_error}）")
+        else:
+            self.quick_step_connect_var.set("3. 点击连接: 待执行")
 
     def _show_error_banner(self, message: str) -> None:
         self.error_banner_var.set(message)
@@ -540,29 +606,6 @@ class RegionEditorApp:
             tts_backend=self.tts_backend_var.get().strip().lower() or "auto",
         )
         self.settings_store.save(settings)
-
-
-def _build_source(mode: str, source_text: str) -> FrameSource:
-    normalized_mode = mode.strip().lower()
-    source = source_text.strip()
-
-    if normalized_mode == "mock":
-        if not source:
-            raise ValueError("mock 模式需要图片路径（可填 --image 或源输入框）")
-        return MockImageSource(source)
-
-    if normalized_mode == "ndi":
-        if not source:
-            raise ValueError("ndi 模式需要源文本（示例: ndi://OBS）")
-        return NDISource(source)
-
-    if normalized_mode == "capture":
-        if not source:
-            raise ValueError("capture 模式需要摄像头编号/视频路径/流地址")
-        cap_source: str | int = int(source) if source.isdigit() else source
-        return OpenCVCaptureSource(cap_source)
-
-    raise ValueError(f"未知 source mode: {mode}")
 
 
 def _bgr_to_photoimage(frame: np.ndarray) -> tk.PhotoImage:
