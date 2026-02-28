@@ -125,7 +125,9 @@ def run_gui(args: argparse.Namespace) -> None:
     settings_store = AppSettingsStore(args.settings_path)
     settings = settings_store.load()
 
-    source_mode, source_text, map_name, tts_backend = _resolve_gui_runtime_settings(args, settings)
+    source_mode, source_text, map_name, tts_backend, detect_enabled = _resolve_gui_runtime_settings(
+        args, settings
+    )
     validate_source_mode_args(source_mode, source_text, allow_empty_source=True)
 
     run_region_editor(
@@ -135,6 +137,7 @@ def run_gui(args: argparse.Namespace) -> None:
         source_mode=source_mode,
         source_text=source_text,
         tts_backend=tts_backend,
+        detect_enabled=detect_enabled,
         settings_path=args.settings_path,
     )
 
@@ -142,7 +145,7 @@ def run_gui(args: argparse.Namespace) -> None:
 def _resolve_gui_runtime_settings(
     args: argparse.Namespace,
     settings: AppSettings,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, bool]:
     source_mode = (args.source_mode or settings.source_mode or "mock").strip().lower()
     map_name = (args.map or settings.map_name or "de_dust2").strip() or "de_dust2"
     tts_backend = (args.tts_backend or settings.tts_backend or "auto").strip().lower()
@@ -152,7 +155,7 @@ def _resolve_gui_runtime_settings(
     else:
         source_text = (args.source or settings.source or "").strip()
 
-    return source_mode, source_text, map_name, tts_backend
+    return source_mode, source_text, map_name, tts_backend, settings.detect_enabled
 
 
 def main() -> None:

@@ -19,6 +19,7 @@ class AppSettings:
     source_mode: str = "mock"
     source: str = ""
     tts_backend: str = "auto"
+    detect_enabled: bool = False
 
 
 class AppSettingsStore:
@@ -39,11 +40,13 @@ class AppSettingsStore:
         source_mode = _normalize_source_mode(data.get("source_mode"))
         source = str(data.get("source") or "").strip()
         tts_backend = _normalize_tts_backend(data.get("tts_backend"))
+        detect_enabled = _normalize_detect_enabled(data.get("detect_enabled"))
         return AppSettings(
             map_name=map_name,
             source_mode=source_mode,
             source=source,
             tts_backend=tts_backend,
+            detect_enabled=detect_enabled,
         )
 
     def save(self, settings: AppSettings) -> Path:
@@ -53,6 +56,7 @@ class AppSettingsStore:
                 source_mode=_normalize_source_mode(settings.source_mode),
                 source=settings.source.strip(),
                 tts_backend=_normalize_tts_backend(settings.tts_backend),
+                detect_enabled=_normalize_detect_enabled(settings.detect_enabled),
             )
         )
         with self.settings_path.open("w", encoding="utf-8") as f:
@@ -73,3 +77,16 @@ def _normalize_tts_backend(value: object) -> str:
         return normalized
     return AppSettings.tts_backend
 
+
+def _normalize_detect_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return AppSettings.detect_enabled

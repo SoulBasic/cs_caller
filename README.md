@@ -20,6 +20,19 @@ pip install -e .
 
 ## CLI 用法
 
+### 0) 严格 2 步快速开跑（推荐）
+
+1. **OBS 开 NDI 输出**：`工具 -> NDI 输出设置` 勾选主输出（源名建议 `OBS`）。
+2. **启动 GUI 后点一次“连接并开始播报”**：
+
+```bash
+python -m cs_caller.cli gui --source-mode ndi --map de_dust2
+```
+
+说明：
+- `ndi` 模式下如果源留空，GUI 会自动填 `ndi://OBS`。
+- 连接成功后会自动开启检测与语音播报；如只想看画面可点“仅预览”。
+
 ### 1) 启动 GUI 编辑器
 
 ```bash
@@ -45,13 +58,16 @@ python -m cs_caller.cli gui --source-mode ndi --source "ndi://OBS"
 
 - 实时预览帧
 - 视频源连接面板（模式/源文本/连接或重连）
+- 一键动作：“连接并开始播报”“保存并开始播报”“仅预览”
 - 可在不关闭编辑器的情况下切换 `mock|ndi|capture` 并重连
 - 源连接状态与错误横幅提示（失败不退出 GUI）
+- 运行模式提示（未连接 / 仅预览 / 播报模式）
 - 鼠标拖拽画矩形区域
 - 释放鼠标后输入 callout 文本
 - 地图新建/载入/保存（保存到 `config/maps/<map>.yaml`）
 - 开启“运行检测并播报”查看映射与语音触发
 - 自动记忆上次设置（`config/app_settings.yaml`：地图、源模式、源文本、TTS）
+- 自动记忆检测开关（播报模式/仅预览）
 - 未传入 `--map/--source-mode/--source/--tts-backend` 时会自动读取上次设置
 
 ### 2) 使用配置执行 mock 检测
@@ -117,18 +133,17 @@ python -m cs_caller.cli gui --image C:\abs\minimap.png --map de_dust2
 
 ### OBS 开启 NDI 后怎么一步跑起来（Windows）
 
-1. 在 OBS 安装并启用 NDI 插件（obs-ndi），重启 OBS。
-2. OBS 菜单点击 `工具 -> NDI 输出设置`，勾选主输出，源名建议固定为 `OBS`。
-3. 确认 Windows 已安装 NDI Runtime（否则 GUI 会在连接区给出错误横幅）。
-4. 在项目目录运行（只需这一条命令）：
+1. OBS 菜单点击 `工具 -> NDI 输出设置`，勾选主输出，源名建议固定为 `OBS`。
+2. 在项目目录运行（只需这一条命令）：
 
 ```powershell
-python -m cs_caller.cli gui --source-mode ndi --source "ndi://OBS" --map de_dust2
+python -m cs_caller.cli gui --source-mode ndi --map de_dust2
 ```
 
-5. GUI 打开后，顶部“视频源连接”区会显示当前模式与源：
-   - 状态为“已连接”即成功拉流；
-   - 若失败，错误横幅会提示原因，此时可直接把模式切到 `mock` 并填入本地图片路径，再点“重连源”，无需重启程序。
+GUI 打开后点“连接并开始播报”即可：
+- `ndi` 源留空会自动填 `ndi://OBS`；
+- 状态为“已连接”即成功拉流；
+- 若失败，错误横幅会提示原因，此时可直接把模式切到 `mock` 并填入本地图片路径，再点“重连源”，无需重启程序。
 
 备注：
 - 程序为单进程架构，NDI 失败不会导致 GUI 退出。

@@ -16,6 +16,7 @@ from cs_caller.detector import RedDotDetector
 from cs_caller.map_config_store import MapConfig, MapConfigStore
 from cs_caller.preflight import PreflightReport, collect_preflight_report
 from cs_caller.region_editor import build_rect_region, normalize_rect, polygon_to_rect
+from cs_caller.runtime_helpers import autofill_source_text, build_operating_mode_hint
 from cs_caller.source_factory import build_source, map_source_factory_error
 from cs_caller.sources.base import (
     FrameSource,
@@ -38,6 +39,7 @@ class RegionEditorApp:
         initial_source_text: str = "",
         fps: float = 16.0,
         tts_backend: str = "auto",
+        initial_detect_enabled: bool = False,
     ) -> None:
         self.store = store
         self.settings_store = settings_store
@@ -49,7 +51,7 @@ class RegionEditorApp:
 
         self.map_name_var = tk.StringVar(value=initial_map)
         self.status_var = tk.StringVar(value="就绪")
-        self.detect_var = tk.BooleanVar(value=False)
+        self.detect_var = tk.BooleanVar(value=initial_detect_enabled)
 
         self.source_mode_var = tk.StringVar(value=initial_source_mode)
         self.source_text_var = tk.StringVar(value=initial_source_text)
@@ -60,6 +62,7 @@ class RegionEditorApp:
         self.quick_step_obs_var = tk.StringVar(value="1. OBS 开 NDI: 待检查")
         self.quick_step_source_var = tk.StringVar(value="2. 输入源: 待检查")
         self.quick_step_connect_var = tk.StringVar(value="3. 点击连接: 待连接")
+        self.operating_mode_var = tk.StringVar(value="当前模式: 未连接（待连接）")
         self.tts_backend_var = tk.StringVar(value=tts_backend)
 
         self._regions: list[Region] = []
@@ -153,6 +156,11 @@ class RegionEditorApp:
             textvariable=self.source_button_text_var,
             command=self._connect_source,
         ).pack(side=tk.LEFT)
+        ttk.Button(
+            source_frame,
+            text="连接并开始播报",
+            command=self._connect_and_start_detect,
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(source_frame, textvariable=self.source_status_var).pack(side=tk.LEFT, padx=(12, 0))
 
@@ -163,6 +171,17 @@ class RegionEditorApp:
         ttk.Label(quick_start, textvariable=self.quick_step_connect_var).pack(anchor=tk.W)
         ttk.Label(quick_start, textvariable=self.preflight_var, foreground="#37474f").pack(
             anchor=tk.W, pady=(4, 0)
+        )
+        action_row = ttk.Frame(quick_start)
+        action_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(action_row, text="保存并开始播报", command=self._save_and_start_detect).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(action_row, text="仅预览", command=self._switch_to_preview_mode).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Label(action_row, textvariable=self.operating_mode_var, foreground="#455a64").pack(
+            side=tk.RIGHT
         )
 
         self.error_banner = tk.Label(
@@ -313,10 +332,7 @@ class RegionEditorApp:
             )
 
     def _toggle_detect(self) -> None:
-        if self.detect_var.get():
-            self.status_var.set("运行检测中（红点映射将触发语音播报）")
-        else:
-            self.status_var.set("检测已停止")
+        self._set_detect_enabled(self.detect_var.get(), persist=True)
 
     def _on_press(self, event: tk.Event[tk.Misc]) -> None:
         self._drag_start = (float(event.x), float(event.y))
@@ -437,15 +453,27 @@ class RegionEditorApp:
         self.status_var.set(f"已加载地图: {config.map_name}")
         self._persist_settings()
 
-    def _save_map(self) -> None:
+    def _save_map(self) -> bool:
         name = self.map_name_var.get().strip()
         if not name:
             messagebox.showwarning("输入错误", "地图名不能为空")
-            return
+            return False
         path = self.store.save(MapConfig(map_name=name, regions=list(self._regions)))
         self.status_var.set(f"已保存: {path}")
         self._refresh_map_list()
         self._persist_settings()
+        return True
+
+    def _save_and_start_detect(self) -> None:
+        if not self._save_map():
+            return
+        self._connect_source(enable_detect_on_success=True)
+
+    def _switch_to_preview_mode(self) -> None:
+        self._set_detect_enabled(False, persist=True)
+
+    def _connect_and_start_detect(self) -> None:
+        self._connect_source(enable_detect_on_success=True)
 
     def _refresh_map_list(self) -> None:
         names = self.store.list_map_names()
@@ -471,12 +499,14 @@ class RegionEditorApp:
             mode = "mock"
             self.source_mode_var.set(mode)
         self._close_source()
+        self._apply_source_autofill(mode)
         self.source_status_var.set(f"未连接（当前模式: {mode}）")
         self.source_button_text_var.set("连接源")
         self.status_var.set("已切换源模式，点击“连接源”后生效")
         self._clear_error_banner()
         self._last_connect_error = ""
         self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
         self._persist_settings()
 
     def _on_source_entry_enter(self, _: tk.Event[tk.Misc]) -> None:
@@ -485,15 +515,16 @@ class RegionEditorApp:
     def _on_source_text_change(self, *_: object) -> None:
         self._refresh_preflight_and_quickstart()
 
-    def _connect_source(self, auto: bool = False) -> None:
+    def _connect_source(self, auto: bool = False, enable_detect_on_success: bool = False) -> None:
         mode = self.source_mode_var.get().strip().lower()
-        source_text = self.source_text_var.get().strip()
+        source_text = self._apply_source_autofill(mode)
 
         self._close_source()
         if auto and not source_text:
             self.source_status_var.set(f"未连接（当前模式: {mode}）")
             self.source_button_text_var.set("连接源")
             self.status_var.set("编辑器已就绪，可在下方输入源并连接")
+            self._update_operating_mode_hint()
             return
 
         try:
@@ -506,6 +537,8 @@ class RegionEditorApp:
             self._last_connect_error = message
             self._show_error_banner(message)
             self._refresh_preflight_and_quickstart()
+            self._update_operating_mode_hint()
+            self._persist_settings()
             if not auto:
                 self.status_var.set("源连接失败，请修正参数后重试")
             return
@@ -515,8 +548,12 @@ class RegionEditorApp:
         self.source_status_var.set(f"已连接: {mode} / {source_text or '-'}")
         self.source_button_text_var.set("重连源")
         self._clear_error_banner()
-        self.status_var.set("源连接成功")
+        if enable_detect_on_success or self.detect_var.get():
+            self._set_detect_enabled(True, persist=False)
+        else:
+            self.status_var.set("源连接成功")
         self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
         self._persist_settings()
 
     def _close_source(self) -> None:
@@ -540,6 +577,7 @@ class RegionEditorApp:
         self.source_button_text_var.set("重连源")
         self._show_error_banner(f"{message}；可先重连或切换源模式")
         self.status_var.set("源读取异常，编辑器仍可继续操作")
+        self._update_operating_mode_hint()
 
     def _handle_source_error(self, message: str) -> None:
         self._close_source()
@@ -549,6 +587,8 @@ class RegionEditorApp:
         self._show_error_banner(message)
         self.status_var.set("源不可用，可切换到 mock 并重连")
         self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
+        self._persist_settings()
 
     def _refresh_preflight_and_quickstart(self) -> None:
         mode = self.source_mode_var.get().strip().lower()
@@ -590,6 +630,32 @@ class RegionEditorApp:
         else:
             self.quick_step_connect_var.set("3. 点击连接: 待执行")
 
+    def _apply_source_autofill(self, mode: str) -> str:
+        source_text = self.source_text_var.get()
+        filled = autofill_source_text(mode, source_text)
+        if filled != source_text:
+            self.source_text_var.set(filled)
+        return filled
+
+    def _set_detect_enabled(self, enabled: bool, *, persist: bool) -> None:
+        self.detect_var.set(enabled)
+        if enabled:
+            self.status_var.set("运行检测中（红点映射将触发语音播报）")
+        else:
+            self.status_var.set("仅预览模式（检测已关闭）")
+        self._update_operating_mode_hint()
+        if persist:
+            self._persist_settings()
+
+    def _update_operating_mode_hint(self) -> None:
+        self.operating_mode_var.set(
+            build_operating_mode_hint(
+                source_mode=self.source_mode_var.get(),
+                source_connected=self._source is not None,
+                detect_enabled=self.detect_var.get(),
+            )
+        )
+
     def _show_error_banner(self, message: str) -> None:
         self.error_banner_var.set(message)
         self.error_banner.pack(fill=tk.X, padx=8)
@@ -604,6 +670,7 @@ class RegionEditorApp:
             source_mode=self.source_mode_var.get().strip().lower() or "mock",
             source=self.source_text_var.get().strip(),
             tts_backend=self.tts_backend_var.get().strip().lower() or "auto",
+            detect_enabled=self.detect_var.get(),
         )
         self.settings_store.save(settings)
 
@@ -624,6 +691,7 @@ def run_region_editor(
     source_mode: str,
     source_text: str,
     tts_backend: str = "auto",
+    detect_enabled: bool = False,
     settings_path: str = "config/app_settings.yaml",
 ) -> None:
     """启动可视化区域编辑器。"""
@@ -637,5 +705,6 @@ def run_region_editor(
         initial_source_text=source_text,
         fps=fps,
         tts_backend=tts_backend,
+        initial_detect_enabled=detect_enabled,
     )
     app.run()

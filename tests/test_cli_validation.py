@@ -1,6 +1,7 @@
 import pytest
 
-from cs_caller.cli import validate_source_mode_args
+from cs_caller.app_settings import AppSettings
+from cs_caller.cli import _resolve_gui_runtime_settings, validate_source_mode_args
 
 
 def test_validate_source_mode_args_accepts_valid_inputs() -> None:
@@ -31,3 +32,22 @@ def test_validate_source_mode_args_allow_empty_source() -> None:
 
 def test_validate_source_mode_args_normalizes_case_and_whitespace() -> None:
     assert validate_source_mode_args("  NDI ", " ndi://OBS ") == "ndi"
+
+
+def test_resolve_gui_runtime_settings_keeps_detect_toggle_from_settings() -> None:
+    class Args:
+        source_mode = None
+        image = None
+        source = None
+        map = None
+        tts_backend = None
+
+    settings = AppSettings(
+        map_name="de_dust2",
+        source_mode="capture",
+        source="0",
+        tts_backend="auto",
+        detect_enabled=True,
+    )
+    resolved = _resolve_gui_runtime_settings(Args(), settings)
+    assert resolved == ("capture", "0", "de_dust2", "auto", True)

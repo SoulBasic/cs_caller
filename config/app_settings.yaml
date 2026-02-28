@@ -2,3 +2,4 @@ map_name: de_dust2
 source_mode: mock
 source: ""
 tts_backend: auto
+detect_enabled: false
