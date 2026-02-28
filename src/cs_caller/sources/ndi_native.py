@@ -1,4 +1,4 @@
-"""原生 NDI 帧源（ndi-python/NDIlib）。"""
+"""原生 NDI 帧源（cyndilib）。"""
 
 from __future__ import annotations
 
@@ -91,27 +91,28 @@ def select_best_ndi_source(source_text: str, discovered: list[NDISourceInfo]) ->
 
 
 def _import_ndi_module(import_module: Callable[[str], Any] = importlib.import_module) -> Any:
-    """导入 NDIlib 模块。"""
+    """导入 cyndilib 模块。"""
 
-    errors: list[str] = []
-    for name in ("NDIlib", "ndi"):
-        try:
-            return import_module(name)
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-    raise SourceConnectError("无法导入 ndi-python 模块（NDIlib）: " + " | ".join(errors))
+    try:
+        return import_module("cyndilib")
+    except Exception as exc:
+        raise SourceConnectError(f"无法导入 cyndilib 模块: {exc}") from exc
 
 
-def _call_first_callable(module: Any, names: tuple[str, ...], *args: Any, **kwargs: Any) -> Any:
+def _resolve_attr(module: Any, dotted_name: str) -> Any:
+    current = module
+    for part in dotted_name.split("."):
+        current = getattr(current, part, None)
+        if current is None:
+            return None
+    return current
+
+
+def _resolve_first(module: Any, names: tuple[str, ...]) -> Any:
     for name in names:
-        fn = getattr(module, name, None)
-        if callable(fn):
-            try:
-                return fn(*args, **kwargs)
-            except TypeError:
-                if args or kwargs:
-                    continue
-                raise
+        value = _resolve_attr(module, name)
+        if value is not None:
+            return value
     return None
 
 
@@ -125,52 +126,65 @@ def discover_ndi_sources(
 
     finder = _create_finder(ndi_module)
     if finder is None:
-        raise SourceConnectError("NDIlib 不支持源发现接口（find_create_v2/find_create）")
+        raise SourceConnectError("cyndilib 不支持源发现接口（Finder）")
 
-    wait_fn = getattr(ndi_module, "find_wait_for_sources", None)
-    get_fn = getattr(ndi_module, "find_get_current_sources", None)
-    destroy_fn = getattr(ndi_module, "find_destroy", None)
-    if not callable(get_fn):
-        if callable(destroy_fn):
-            destroy_fn(finder)
-        raise SourceConnectError("NDIlib 缺少 find_get_current_sources 接口")
-
+    wait_fn = getattr(finder, "wait_for_sources", None)
+    get_names_fn = getattr(finder, "get_source_names", None)
+    get_source_fn = getattr(finder, "get_source", None)
+    get_sources_fn = getattr(finder, "get_sources", None)
+    close_fn = getattr(finder, "close", None)
     try:
         if callable(wait_fn):
             for _ in range(max(1, int(wait_rounds))):
-                wait_fn(finder, int(timeout_ms))
-        raw_sources = list(get_fn(finder) or [])
+                wait_fn(int(timeout_ms))
+
+        raw_sources: list[Any] = []
+        if callable(get_names_fn) and callable(get_source_fn):
+            for name in list(get_names_fn() or []):
+                try:
+                    src = get_source_fn(name)
+                except Exception:
+                    src = None
+                if src is not None:
+                    raw_sources.append(src)
+        elif callable(get_sources_fn):
+            raw_sources = list(get_sources_fn() or [])
+        else:
+            raise SourceConnectError("cyndilib Finder 缺少 get_source_names/get_source 接口")
     finally:
-        if callable(destroy_fn):
-            destroy_fn(finder)
+        if callable(close_fn):
+            close_fn()
 
     parsed: list[NDISourceInfo] = []
     for src in raw_sources:
-        name = _safe_decode(getattr(src, "ndi_name", "")) or _safe_decode(
-            getattr(src, "p_ndi_name", "")
+        name = (
+            _safe_decode(getattr(src, "name", ""))
+            or _safe_decode(getattr(src, "ndi_name", ""))
+            or _safe_decode(getattr(src, "p_ndi_name", ""))
         )
-        addr = _safe_decode(getattr(src, "url_address", "")) or _safe_decode(
-            getattr(src, "p_url_address", "")
+        addr = (
+            _safe_decode(getattr(src, "url_address", ""))
+            or _safe_decode(getattr(src, "address", ""))
+            or _safe_decode(getattr(src, "p_url_address", ""))
         )
         parsed.append(NDISourceInfo(name=name.strip(), address=addr.strip(), raw=src))
     return parsed
 
 
 def _create_finder(ndi_module: Any) -> Any:
-    create_v2 = getattr(ndi_module, "find_create_v2", None)
-    if callable(create_v2):
+    finder_cls = _resolve_first(ndi_module, ("Finder", "finder.Finder"))
+    if not callable(finder_cls):
+        return None
+    finder = finder_cls()
+    open_fn = getattr(finder, "open", None)
+    if callable(open_fn):
         try:
-            return create_v2()
+            opened = open_fn()
+            if opened is False:
+                raise SourceConnectError("NDI Finder 初始化失败，请确认 NDI Runtime 已安装")
         except TypeError:
-            find_cfg = getattr(ndi_module, "FindCreateV2", None)
-            if callable(find_cfg):
-                return create_v2(find_cfg())
-
-    create_v1 = getattr(ndi_module, "find_create", None)
-    if callable(create_v1):
-        return create_v1()
-
-    return None
+            open_fn(True)
+    return finder
 
 
 def _safe_decode(value: Any) -> str:
@@ -182,7 +196,7 @@ def _safe_decode(value: Any) -> str:
 
 
 class NDISource(FrameSource):
-    """原生 NDI 接收源。"""
+    """cyndilib NDI 接收源。"""
 
     def __init__(
         self,
@@ -201,6 +215,7 @@ class NDISource(FrameSource):
 
         self._ndi = ndi_module or _import_ndi_module()
         self._receiver: Any | None = None
+        self._frame_sync: Any | None = None
         self._active_source: NDISourceInfo | None = None
         self._initialize_ndi()
         self._connect_with_retry()
@@ -210,24 +225,24 @@ class NDISource(FrameSource):
             self._connect_with_retry()
 
         assert self._receiver is not None
-        frame_type, video_frame = self._capture_video_frame()
-        frame_type_video = getattr(self._ndi, "FRAME_TYPE_VIDEO", None)
-
-        if frame_type != frame_type_video or video_frame is None:
-            raise SourceReadError(
-                f"NDI 未返回视频帧（type={frame_type}，源={self.source_text or '-'})"
-            )
-
+        video_frame = self._capture_video_frame()
+        if video_frame is None:
+            raise SourceReadError(f"NDI 未返回视频帧（源={self.source_text or '-'}）")
         return self._copy_video_frame_to_bgr(video_frame)
 
     def close(self) -> None:
-        recv_destroy = getattr(self._ndi, "recv_destroy", None)
-        if self._receiver is not None and callable(recv_destroy):
-            recv_destroy(self._receiver)
+        fs_close = getattr(self._frame_sync, "close", None)
+        if self._frame_sync is not None and callable(fs_close):
+            fs_close()
+        self._frame_sync = None
+
+        recv_close = getattr(self._receiver, "close", None)
+        if self._receiver is not None and callable(recv_close):
+            recv_close()
         self._receiver = None
 
     def _initialize_ndi(self) -> None:
-        init = getattr(self._ndi, "initialize", None)
+        init = _resolve_first(self._ndi, ("initialize", "ndi.initialize"))
         if callable(init):
             ok = bool(init())
             if not ok:
@@ -260,84 +275,134 @@ class NDISource(FrameSource):
 
         receiver = self._create_receiver()
         if receiver is None:
-            raise SourceConnectError("NDI 接收器创建失败（recv_create_v3/recv_create_v2 不可用）")
+            raise SourceConnectError("NDI 接收器创建失败（Receiver 不可用）")
 
-        connect_fn = getattr(self._ndi, "recv_connect", None)
-        if not callable(connect_fn):
-            raise SourceConnectError("NDIlib 缺少 recv_connect 接口")
-        connect_fn(receiver, selected.raw)
+        set_source_fn = getattr(receiver, "set_source", None)
+        if callable(set_source_fn):
+            set_source_fn(selected.raw)
+        elif hasattr(receiver, "source"):
+            setattr(receiver, "source", selected.raw)
+        else:
+            raise SourceConnectError("cyndilib Receiver 缺少 set_source/source 接口")
+
+        connect_fn = getattr(receiver, "connect", None)
+        if callable(connect_fn):
+            try:
+                connect_fn()
+            except TypeError:
+                connect_fn(int(self.connect_timeout_ms))
 
         self._receiver = receiver
+        self._frame_sync = self._create_frame_sync(receiver)
         self._active_source = selected
 
     def _create_receiver(self) -> Any:
-        create_v3 = getattr(self._ndi, "recv_create_v3", None)
-        recv_create_v3_cfg = getattr(self._ndi, "RecvCreateV3", None)
-        if callable(create_v3) and callable(recv_create_v3_cfg):
-            cfg = recv_create_v3_cfg()
-            color_format = getattr(self._ndi, "RECV_COLOR_FORMAT_BGRX_BGRA", None)
-            if color_format is not None and hasattr(cfg, "color_format"):
-                setattr(cfg, "color_format", color_format)
-            return create_v3(cfg)
+        receiver_cls = _resolve_first(self._ndi, ("Receiver", "receiver.Receiver"))
+        if not callable(receiver_cls):
+            return None
+        try:
+            return receiver_cls()
+        except TypeError:
+            # 兼容需要配置对象的版本
+            cfg_cls = _resolve_first(self._ndi, ("RecvCreate", "receiver.RecvCreate"))
+            if callable(cfg_cls):
+                return receiver_cls(cfg_cls())
+            raise
 
-        create_v2 = getattr(self._ndi, "recv_create_v2", None)
-        if callable(create_v2):
-            return create_v2()
+    def _create_frame_sync(self, receiver: Any) -> Any | None:
+        framesync_cls = _resolve_first(
+            self._ndi,
+            ("FrameSync", "framesync.FrameSync", "video_frame.FrameSync"),
+        )
+        if not callable(framesync_cls):
+            return None
+        try:
+            return framesync_cls(receiver)
+        except TypeError:
+            return None
 
-        create_v1 = getattr(self._ndi, "recv_create", None)
-        if callable(create_v1):
-            return create_v1()
+    def _capture_video_frame(self) -> Any | None:
+        if self._frame_sync is not None:
+            capture_video = getattr(self._frame_sync, "capture_video", None)
+            if callable(capture_video):
+                try:
+                    result = capture_video()
+                except TypeError:
+                    result = capture_video(int(self.read_timeout_ms))
+                if result is False:
+                    return None
+                if result not in (None, True):
+                    return result
+            frame = getattr(self._frame_sync, "video_frame", None)
+            if frame is not None:
+                return frame
 
-        return None
+        capture_names = ("capture_video", "receive_video", "recv_capture")
+        for name in capture_names:
+            fn = getattr(self._receiver, name, None)
+            if not callable(fn):
+                continue
+            try:
+                result = fn(int(self.read_timeout_ms))
+            except TypeError:
+                result = fn()
 
-    def _capture_video_frame(self) -> tuple[Any, Any]:
-        capture_v3 = getattr(self._ndi, "recv_capture_v3", None)
-        capture_v2 = getattr(self._ndi, "recv_capture_v2", None)
-        capture_v1 = getattr(self._ndi, "recv_capture", None)
+            if isinstance(result, tuple):
+                if len(result) >= 2:
+                    return result[1]
+                return None
+            if result is False:
+                return None
+            if result is True:
+                return getattr(self._receiver, "video_frame", None)
+            return result
 
-        if callable(capture_v3):
-            result = capture_v3(self._receiver, int(self.read_timeout_ms))
-        elif callable(capture_v2):
-            result = capture_v2(self._receiver, int(self.read_timeout_ms))
-        elif callable(capture_v1):
-            result = capture_v1(self._receiver, int(self.read_timeout_ms))
-        else:
-            raise SourceReadError("NDIlib 缺少 recv_capture_v2/recv_capture_v3 接口")
-
-        if not isinstance(result, tuple) or len(result) < 2:
-            raise SourceReadError("NDI recv_capture 返回值格式异常")
-        return result[0], result[1]
+        raise SourceReadError("cyndilib 缺少可用的视频帧采集接口")
 
     def _copy_video_frame_to_bgr(self, video_frame: Any) -> np.ndarray:
+        arr = _extract_frame_array(video_frame)
         try:
-            data = getattr(video_frame, "data")
-            xres = int(getattr(video_frame, "xres"))
-            yres = int(getattr(video_frame, "yres"))
-        except Exception as exc:
-            raise SourceReadError(f"NDI 视频帧字段缺失: {exc}") from exc
-
-        try:
-            if isinstance(data, np.ndarray):
-                arr = np.array(data, copy=True)
-            else:
-                stride = int(getattr(video_frame, "line_stride_in_bytes", xres * 4))
-                row_pixels = max(xres, abs(stride) // 4)
-                expected = row_pixels * yres * 4
-                arr = np.frombuffer(data, dtype=np.uint8, count=expected)
-                arr = np.array(arr, copy=True).reshape((yres, row_pixels, 4))
-
-            if arr.ndim != 3 or arr.shape[2] < 3:
+            if arr.ndim == 2:
+                arr = np.repeat(arr[:, :, None], 3, axis=2)
+            if arr.ndim != 3:
                 raise SourceReadError(f"NDI 视频帧格式异常: shape={getattr(arr, 'shape', None)}")
-
-            return np.ascontiguousarray(arr[:, :xres, :3])
+            if arr.shape[2] == 4:
+                arr = arr[:, :, :3]
+            if arr.shape[2] < 3:
+                raise SourceReadError(f"NDI 视频帧通道异常: shape={arr.shape}")
+            return np.ascontiguousarray(arr[:, :, :3])
         except SourceReadError:
             raise
         except Exception as exc:
             raise SourceReadError(f"NDI 视频帧转换失败: {exc}") from exc
-        finally:
-            _call_first_callable(
-                self._ndi,
-                ("recv_free_video_v2", "recv_free_video_v3", "recv_free_video"),
-                self._receiver,
-                video_frame,
-            )
+
+
+def _extract_frame_array(video_frame: Any) -> np.ndarray:
+    if isinstance(video_frame, np.ndarray):
+        return np.array(video_frame, copy=True)
+
+    for name in ("as_ndarray", "to_numpy", "get_array"):
+        fn = getattr(video_frame, name, None)
+        if callable(fn):
+            arr = fn()
+            if isinstance(arr, np.ndarray):
+                return np.array(arr, copy=True)
+
+    xres = int(getattr(video_frame, "xres", getattr(video_frame, "width", 0)))
+    yres = int(getattr(video_frame, "yres", getattr(video_frame, "height", 0)))
+    if xres <= 0 or yres <= 0:
+        raise SourceReadError("NDI 视频帧尺寸缺失")
+
+    data = getattr(video_frame, "data", video_frame)
+    stride = int(getattr(video_frame, "line_stride_in_bytes", xres * 4))
+    channels = 4 if abs(stride) >= (xres * 4) else 3
+    row_pixels = max(xres, abs(stride) // max(channels, 1))
+    expected = row_pixels * yres * channels
+    try:
+        view = memoryview(data)
+    except TypeError as exc:
+        raise SourceReadError(f"NDI 视频帧不可读: {exc}") from exc
+
+    arr = np.frombuffer(view, dtype=np.uint8, count=expected)
+    arr = np.array(arr, copy=True).reshape((yres, row_pixels, channels))
+    return arr[:, :xres, :]

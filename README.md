@@ -21,7 +21,7 @@ pip install -e .
 NDI 模式额外依赖：
 
 ```bash
-pip install ndi-python
+pip install "cyndilib==0.0.9"
 ```
 
 ## CLI 用法
@@ -111,6 +111,23 @@ scripts\windows\build_exe.bat
 
 ## Windows 使用说明（中文）
 
+### Windows 免编译安装（NDI）
+
+```powershell
+cd C:\path\to\cs_caller
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m pip install "cyndilib==0.0.9"
+```
+
+然后安装 NDI Runtime（必须）：
+- 打开 `https://ndi.video/tools/ndi-core-suite/`
+- 下载并安装 NDI Runtime/Core Suite（x64）
+- 安装后重启 PowerShell，再运行 GUI
+
 ### 环境准备
 
 1. 安装 Python 3.10+（建议 3.11）。
@@ -124,11 +141,11 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-3. 安装原生 NDI Python 绑定：
+3. 安装原生 NDI 后端（免编译）：
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install ndi-python
+python -m pip install "cyndilib==0.0.9"
 ```
 
 4. 安装 NDI Runtime（必须）：
@@ -173,7 +190,7 @@ GUI 打开后点“连接并开始播报”即可：
 
 | 现象 | 快速定位 | 精确处理 |
 | --- | --- | --- |
-| 打不开流（连接失败） | GUI 顶部“视频源连接”状态为“连接失败”且有红色横幅 | 1) 确认 OBS `工具 -> NDI 输出设置` 已开启主输出；2) `source` 可填 `OBS` / `ndi://OBS` / 完整源名；3) 对照横幅里“发现 N 个源: ...”修正输入；4) 按预检提示安装 `ndi-python` 与 NDI Runtime。 |
+| 打不开流（连接失败） | GUI 顶部“视频源连接”状态为“连接失败”且有红色横幅 | 1) 确认 OBS `工具 -> NDI 输出设置` 已开启主输出；2) `source` 可填 `OBS` / `ndi://OBS` / 完整源名；3) 对照横幅里“发现 N 个源: ...”修正输入；4) 按预检提示安装 `cyndilib` 与 NDI Runtime。 |
 | 无画面（连上但黑屏/卡住） | 状态为“已连接”但画布无更新，或出现“读取异常” | 1) OBS 先确认推流画面在动；2) 检查防火墙/局域网连通；3) 点“重连源”；4) 仍失败先切 `mock` 验证检测链路。 |
 | 有画面不播报 | 画布有画面，但无“检测到: xxx”覆盖文本或无语音 | 1) 勾选“运行检测并播报”；2) 检查区域是否覆盖红点位置并已保存地图；3) 切换 `--tts-backend console` 验证是否仅 TTS 后端问题。 |
 

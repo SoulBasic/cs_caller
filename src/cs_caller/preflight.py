@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-WINDOWS_NDI_PYTHON_INSTALL_GUIDE = (
-    "未安装 ndi-python。Windows 安装步骤："
+WINDOWS_NDI_BACKEND_INSTALL_GUIDE = (
+    "未安装 cyndilib。Windows 免编译安装步骤："
     "1) 进入项目目录并激活虚拟环境：.\\.venv\\Scripts\\Activate.ps1；"
     "2) 升级 pip：python -m pip install --upgrade pip；"
-    "3) 安装 NDI Python 绑定：python -m pip install ndi-python。"
+    "3) 安装预编译 NDI 后端：python -m pip install \"cyndilib==0.0.9\"。"
 )
 
 WINDOWS_NDI_RUNTIME_INSTALL_GUIDE = (
@@ -70,14 +70,26 @@ def check_ndi_runtime_available(
     finder = find_library or ctypes.util.find_library
     env_vars = env or dict(os.environ)
 
-    # 优先通过 NDIlib 初始化探测（最接近实际运行可用性）
+    # 优先通过 cyndilib Finder 探测（最接近实际运行可用性）
     try:
-        ndi = import_module("NDIlib")
-        initialize = getattr(ndi, "initialize", None)
-        if callable(initialize):
-            if bool(initialize()):
-                return True, "已通过 NDIlib.initialize() 验证 Runtime 可用"
-            return False, WINDOWS_NDI_RUNTIME_INSTALL_GUIDE
+        ndi = import_module("cyndilib")
+        finder_cls = getattr(ndi, "Finder", None)
+        if finder_cls is None:
+            finder_mod = getattr(ndi, "finder", None)
+            finder_cls = getattr(finder_mod, "Finder", None) if finder_mod is not None else None
+        if callable(finder_cls):
+            finder = finder_cls()
+            open_fn = getattr(finder, "open", None)
+            close_fn = getattr(finder, "close", None)
+            try:
+                if callable(open_fn):
+                    opened = open_fn()
+                    if opened is False:
+                        return False, WINDOWS_NDI_RUNTIME_INSTALL_GUIDE
+                return True, "已通过 cyndilib Finder 验证 Runtime 可用"
+            finally:
+                if callable(close_fn):
+                    close_fn()
     except Exception:
         pass
 
@@ -105,17 +117,25 @@ def check_ndi_runtime_available(
     return False, WINDOWS_NDI_RUNTIME_INSTALL_GUIDE
 
 
+def check_ndi_backend_module_available(
+    *,
+    import_module: Callable[[str], Any] = importlib.import_module,
+) -> tuple[bool, str]:
+    """检查 cyndilib 模块可导入。"""
+
+    try:
+        import_module("cyndilib")
+        return True, "已检测到 cyndilib 模块"
+    except Exception:
+        return False, WINDOWS_NDI_BACKEND_INSTALL_GUIDE
+
+
 def check_ndi_python_module_available(
     *,
     import_module: Callable[[str], Any] = importlib.import_module,
 ) -> tuple[bool, str]:
-    """检查 ndi-python（NDIlib）模块可导入。"""
-
-    try:
-        import_module("NDIlib")
-        return True, "已检测到 ndi-python 模块（NDIlib）"
-    except Exception:
-        return False, WINDOWS_NDI_PYTHON_INSTALL_GUIDE
+    """兼容旧调用方：已切换到 cyndilib 检查。"""
+    return check_ndi_backend_module_available(import_module=import_module)
 
 
 def collect_preflight_report(
@@ -175,12 +195,12 @@ def collect_preflight_report(
             )
 
     if normalized_mode == "ndi":
-        module_checker = ndi_module_checker or check_ndi_python_module_available
+        module_checker = ndi_module_checker or check_ndi_backend_module_available
         module_ok, module_detail = module_checker()
         items.append(
             PreflightItem(
-                key="ndi_python_module",
-                label="ndi-python 模块",
+                key="ndi_backend_module",
+                label="cyndilib 模块",
                 ok=module_ok,
                 detail=module_detail,
                 blocking=True,

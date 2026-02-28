@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from cs_caller.preflight import (
-    check_ndi_python_module_available,
+    check_ndi_backend_module_available,
     check_ndi_runtime_available,
     collect_preflight_report,
 )
@@ -30,24 +30,26 @@ def test_collect_preflight_report_ndi_runtime_missing() -> None:
     assert "未检测到 NDI Runtime" in "\n".join(report.hints)
 
 
-def test_collect_preflight_report_ndi_python_missing_is_blocking() -> None:
+def test_collect_preflight_report_ndi_backend_missing_is_blocking() -> None:
     report = collect_preflight_report(
         mode="ndi",
         source_text="ndi://OBS",
-        ndi_module_checker=lambda: (False, "未安装 ndi-python"),
+        ndi_module_checker=lambda: (False, "未安装 cyndilib"),
         ndi_runtime_checker=lambda: (True, "runtime ok"),
     )
 
     assert report.has_blocking_error is True
-    item = next(it for it in report.items if it.key == "ndi_python_module")
+    item = next(it for it in report.items if it.key == "ndi_backend_module")
     assert item.ok is False
-    assert "ndi-python" in item.detail
+    assert "cyndilib" in item.detail
 
 
-def test_check_ndi_python_module_available_missing() -> None:
-    ok, detail = check_ndi_python_module_available(import_module=lambda _: (_ for _ in ()).throw(ImportError()))
+def test_check_ndi_backend_module_available_missing() -> None:
+    ok, detail = check_ndi_backend_module_available(
+        import_module=lambda _: (_ for _ in ()).throw(ImportError())
+    )
     assert ok is False
-    assert "ndi-python" in detail
+    assert "cyndilib" in detail
 
 
 def test_collect_preflight_report_capture_negative_index_is_blocking() -> None:
@@ -79,3 +81,16 @@ def test_collect_preflight_report_mock_file_exists() -> None:
     )
 
     assert report.has_blocking_error is False
+
+
+def test_collect_preflight_report_ndi_source_format_empty_after_scheme() -> None:
+    report = collect_preflight_report(
+        mode="ndi",
+        source_text="ndi://   ",
+        ndi_module_checker=lambda: (True, "ok"),
+        ndi_runtime_checker=lambda: (True, "ok"),
+    )
+
+    item = next(it for it in report.items if it.key == "ndi_source_format")
+    assert item.ok is False
+    assert item.blocking is False

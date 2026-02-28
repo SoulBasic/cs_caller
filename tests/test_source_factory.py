@@ -23,15 +23,15 @@ def test_source_factory_rejects_negative_capture_index() -> None:
 
 
 def test_source_factory_ndi_runtime_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cs_caller.source_factory.check_ndi_python_module_available", lambda: (True, "ok"))
+    monkeypatch.setattr("cs_caller.source_factory.check_ndi_backend_module_available", lambda: (True, "ok"))
     monkeypatch.setattr("cs_caller.source_factory.check_ndi_runtime_available", lambda: (False, "缺失"))
 
     with pytest.raises(SourceFactoryError, match="缺失"):
         build_source("ndi", "ndi://OBS")
 
 
-def test_source_factory_ndi_python_module_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("cs_caller.source_factory.check_ndi_python_module_available", lambda: (False, "请安装"))
+def test_source_factory_ndi_backend_module_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cs_caller.source_factory.check_ndi_backend_module_available", lambda: (False, "请安装"))
 
     with pytest.raises(SourceFactoryError, match="请安装"):
         build_source("ndi", "ndi://OBS")
