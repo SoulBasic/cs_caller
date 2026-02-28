@@ -54,6 +54,24 @@ python -m cs_caller.cli mock --image /absolute/path/to/minimap.png --map de_dust
 - `--max-frames`：最多处理帧数（默认 `120`）
 - `--tts-backend`：`auto|pyttsx3|console`
 
+## Windows 单EXE打包（单进程）
+
+> 按大师要求：保持单进程，不拆前后端。
+
+1. 准备一张默认样图到：`assets/minimap_sample.png`
+2. 在 Windows PowerShell/cmd 运行：
+
+```bat
+scripts\windows\build_exe.bat
+```
+
+3. 产物：`dist\cs_caller\cs_caller.exe`
+
+说明：
+- EXE 启动后直接进入 GUI 编辑器。
+- 配置保存在 `config/maps/*.yaml`。
+- 后续接入 NDI 时仍保持同一进程内运行。
+
 ## Windows 使用说明（中文）
 
 ### 环境准备
