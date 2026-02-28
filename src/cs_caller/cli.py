@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from cs_caller.app_settings import AppSettings, AppSettingsStore
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CS 报点原型 CLI")
@@ -33,22 +35,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     gui = sub.add_parser("gui", help="启动可视化区域编辑器")
-    gui.add_argument("--image", default=None, help="本地小地图图片绝对路径（mock 模式）")
+    gui.add_argument("--image", default=None, help="mock 模式图片路径（等价于 --source）")
     gui.add_argument(
         "--source-mode",
-        default="mock",
+        default=None,
         choices=["mock", "ndi", "capture"],
         help="视频源模式：mock图片 / ndi流 / 通用capture",
     )
     gui.add_argument("--source", default=None, help="ndi/capture 模式下的视频源")
-    gui.add_argument("--map", default="de_dust2", help="默认加载地图名")
+    gui.add_argument("--map", default=None, help="默认加载地图名")
     gui.add_argument("--maps-dir", default="config/maps", help="地图 YAML 目录")
     gui.add_argument("--fps", type=float, default=16.0, help="预览帧率")
     gui.add_argument(
         "--tts-backend",
-        default="auto",
+        default=None,
         choices=["auto", "pyttsx3", "console"],
         help="运行检测时使用的 TTS 后端",
+    )
+    gui.add_argument(
+        "--settings-path",
+        default="config/app_settings.yaml",
+        help="GUI 设置文件路径",
     )
     return parser
 
@@ -88,32 +95,64 @@ def run_mock(args: argparse.Namespace) -> None:
     pipeline.run(max_frames=args.max_frames)
 
 
+def validate_source_mode_args(
+    source_mode: str,
+    source: str | None,
+    *,
+    allow_empty_source: bool = False,
+) -> str:
+    """校验 GUI 源参数组合，返回规范化 mode。"""
+    mode = source_mode.strip().lower()
+    if mode not in {"mock", "ndi", "capture"}:
+        raise ValueError(f"未知 source mode: {source_mode}")
+
+    value = (source or "").strip()
+    if allow_empty_source and not value:
+        return mode
+
+    if mode == "mock" and not value:
+        raise ValueError("mock 模式需要图片路径（--image 或 --source）")
+    if mode == "ndi" and not value:
+        raise ValueError("ndi 模式需要 --source（示例: ndi://OBS）")
+    if mode == "capture" and not value:
+        raise ValueError("capture 模式需要 --source（摄像头编号/视频路径/流地址）")
+    return mode
+
+
 def run_gui(args: argparse.Namespace) -> None:
     from cs_caller.gui.app import run_region_editor
-    from cs_caller.sources.base import NDISource, OpenCVCaptureSource
-    from cs_caller.sources.mock_source import MockImageSource
 
-    if args.source_mode == "mock":
-        if not args.image:
-            raise ValueError("mock 模式需要 --image")
-        source = MockImageSource(args.image)
-    elif args.source_mode == "ndi":
-        if not args.source:
-            raise ValueError("ndi 模式需要 --source（例如 ndi://OBS）")
-        source = NDISource(args.source)
-    else:
-        if args.source is None:
-            raise ValueError("capture 模式需要 --source（摄像头编号/视频路径/流地址）")
-        cap_source: str | int = int(args.source) if str(args.source).isdigit() else args.source
-        source = OpenCVCaptureSource(cap_source)
+    settings_store = AppSettingsStore(args.settings_path)
+    settings = settings_store.load()
+
+    source_mode, source_text, map_name, tts_backend = _resolve_gui_runtime_settings(args, settings)
+    validate_source_mode_args(source_mode, source_text, allow_empty_source=True)
 
     run_region_editor(
-        source=source,
         maps_dir=args.maps_dir,
-        map_name=args.map,
+        map_name=map_name,
         fps=args.fps,
-        tts_backend=args.tts_backend,
+        source_mode=source_mode,
+        source_text=source_text,
+        tts_backend=tts_backend,
+        settings_path=args.settings_path,
     )
+
+
+def _resolve_gui_runtime_settings(
+    args: argparse.Namespace,
+    settings: AppSettings,
+) -> tuple[str, str, str, str]:
+    source_mode = (args.source_mode or settings.source_mode or "mock").strip().lower()
+    map_name = (args.map or settings.map_name or "de_dust2").strip() or "de_dust2"
+    tts_backend = (args.tts_backend or settings.tts_backend or "auto").strip().lower()
+
+    if source_mode == "mock":
+        source_text = (args.image or args.source or settings.source or "").strip()
+    else:
+        source_text = (args.source or settings.source or "").strip()
+
+    return source_mode, source_text, map_name, tts_backend
 
 
 def main() -> None:

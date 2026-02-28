@@ -10,11 +10,20 @@ import cv2
 import numpy as np
 
 from cs_caller.announcer import Announcer
+from cs_caller.app_settings import AppSettings, AppSettingsStore
 from cs_caller.callout_mapper import CalloutMapper, Region
 from cs_caller.detector import RedDotDetector
 from cs_caller.map_config_store import MapConfig, MapConfigStore
 from cs_caller.region_editor import build_rect_region, normalize_rect, polygon_to_rect
-from cs_caller.sources.base import FrameSource
+from cs_caller.sources.base import (
+    FrameSource,
+    NDISource,
+    OpenCVCaptureSource,
+    SourceConnectError,
+    SourceError,
+    SourceReadError,
+)
+from cs_caller.sources.mock_source import MockImageSource
 from cs_caller.tts import create_tts
 
 
@@ -23,25 +32,35 @@ class RegionEditorApp:
 
     def __init__(
         self,
-        source: FrameSource,
         store: MapConfigStore,
+        settings_store: AppSettingsStore,
         initial_map: str = "default",
+        initial_source_mode: str = "mock",
+        initial_source_text: str = "",
         fps: float = 16.0,
         tts_backend: str = "auto",
     ) -> None:
-        self.source = source
         self.store = store
+        self.settings_store = settings_store
         self.target_fps = max(1.0, fps)
 
         self.root = tk.Tk()
         self.root.title("CS Caller 地图区域编辑器")
-        self.root.geometry("1200x800")
+        self.root.geometry("1240x860")
 
         self.map_name_var = tk.StringVar(value=initial_map)
         self.status_var = tk.StringVar(value="就绪")
         self.detect_var = tk.BooleanVar(value=False)
 
+        self.source_mode_var = tk.StringVar(value=initial_source_mode)
+        self.source_text_var = tk.StringVar(value=initial_source_text)
+        self.source_status_var = tk.StringVar(value="未连接（请填写源并点击连接）")
+        self.source_button_text_var = tk.StringVar(value="连接源")
+        self.error_banner_var = tk.StringVar(value="")
+        self.tts_backend_var = tk.StringVar(value=tts_backend)
+
         self._regions: list[Region] = []
+        self._source: FrameSource | None = None
         self._frame: Optional[np.ndarray] = None
         self._photo: Optional[tk.PhotoImage] = None
         self._image_id: Optional[int] = None
@@ -52,16 +71,20 @@ class RegionEditorApp:
         self._draft_rect_id: Optional[int] = None
         self._last_detect_point: tuple[int, int] | None = None
         self._last_callout: str | None = None
+        self._consecutive_read_failures = 0
+        self._read_failure_disconnect_threshold = 3
 
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_map_list()
         self._try_load(initial_map)
+        self._on_source_mode_change(None)
+        if self.source_text_var.get().strip():
+            self._connect_source(auto=True)
 
     def _on_close(self) -> None:
-        close = getattr(self.source, "close", None)
-        if callable(close):
-            close()
+        self._close_source()
+        self._persist_settings()
         self.root.destroy()
 
     def _build_layout(self) -> None:
@@ -87,7 +110,57 @@ class RegionEditorApp:
             side=tk.LEFT, padx=(8, 0)
         )
 
+        ttk.Label(top, text="TTS:").pack(side=tk.LEFT, padx=(18, 4))
+        tts_combo = ttk.Combobox(
+            top,
+            textvariable=self.tts_backend_var,
+            values=["auto", "pyttsx3", "console"],
+            width=10,
+            state="readonly",
+        )
+        tts_combo.pack(side=tk.LEFT)
+        tts_combo.bind("<<ComboboxSelected>>", self._on_tts_backend_change)
+
         ttk.Label(top, textvariable=self.status_var).pack(side=tk.RIGHT)
+
+        source_frame = ttk.LabelFrame(self.root, text="视频源连接", padding=8)
+        source_frame.pack(fill=tk.X, padx=8, pady=(0, 6))
+
+        ttk.Label(source_frame, text="模式:").pack(side=tk.LEFT)
+        source_mode_combo = ttk.Combobox(
+            source_frame,
+            textvariable=self.source_mode_var,
+            values=["mock", "ndi", "capture"],
+            width=10,
+            state="readonly",
+        )
+        source_mode_combo.pack(side=tk.LEFT, padx=(4, 10))
+        source_mode_combo.bind("<<ComboboxSelected>>", self._on_source_mode_change)
+
+        ttk.Label(source_frame, text="源:").pack(side=tk.LEFT)
+        self.source_entry = ttk.Entry(source_frame, textvariable=self.source_text_var, width=48)
+        self.source_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 8))
+        self.source_entry.bind("<Return>", self._on_source_entry_enter)
+
+        ttk.Button(
+            source_frame,
+            textvariable=self.source_button_text_var,
+            command=self._connect_source,
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(source_frame, textvariable=self.source_status_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        self.error_banner = tk.Label(
+            self.root,
+            textvariable=self.error_banner_var,
+            anchor=tk.W,
+            fg="#b00020",
+            bg="#ffe7eb",
+            padx=8,
+            pady=4,
+        )
+        self.error_banner.pack(fill=tk.X, padx=8)
+        self.error_banner.pack_forget()
 
         center = ttk.Frame(self.root, padding=(8, 0, 8, 8))
         center.pack(fill=tk.BOTH, expand=True)
@@ -116,7 +189,7 @@ class RegionEditorApp:
         self.root.mainloop()
 
     def _tick_frame(self) -> None:
-        frame = self.source.read()
+        frame = self._safe_read_frame()
         if frame is not None:
             self._frame = frame
             self._show_frame(frame)
@@ -125,6 +198,29 @@ class RegionEditorApp:
 
         interval_ms = int(1000 / self.target_fps)
         self.root.after(interval_ms, self._tick_frame)
+
+    def _safe_read_frame(self) -> Optional[np.ndarray]:
+        if self._source is None:
+            return None
+
+        try:
+            frame = self._source.read()
+        except SourceConnectError as exc:
+            self._handle_source_error(str(exc))
+            return None
+        except (SourceReadError, SourceError) as exc:
+            self._handle_source_read_failure(str(exc))
+            return None
+        except Exception as exc:  # pragma: no cover - 最后兜底
+            self._handle_source_error(f"源读取出现未预期错误: {exc}")
+            return None
+
+        if frame is None:
+            self._handle_source_read_failure("当前源未返回帧")
+            return None
+        self._consecutive_read_failures = 0
+        self._clear_error_banner()
+        return frame
 
     def _show_frame(self, frame: np.ndarray) -> None:
         photo = _bgr_to_photoimage(frame)
@@ -300,6 +396,7 @@ class RegionEditorApp:
         self._refresh_region_list()
         self._draw_overlays()
         self.status_var.set(f"新建地图: {name}")
+        self._persist_settings()
 
     def _load_map(self) -> None:
         self._try_load(self.map_name_var.get())
@@ -315,6 +412,7 @@ class RegionEditorApp:
             self._refresh_region_list()
             self._draw_overlays()
             self.status_var.set(f"未找到地图 {name}，已进入空白编辑")
+            self._persist_settings()
             return
 
         self.map_name_var.set(config.map_name)
@@ -322,6 +420,7 @@ class RegionEditorApp:
         self._refresh_region_list()
         self._draw_overlays()
         self.status_var.set(f"已加载地图: {config.map_name}")
+        self._persist_settings()
 
     def _save_map(self) -> None:
         name = self.map_name_var.get().strip()
@@ -331,10 +430,139 @@ class RegionEditorApp:
         path = self.store.save(MapConfig(map_name=name, regions=list(self._regions)))
         self.status_var.set(f"已保存: {path}")
         self._refresh_map_list()
+        self._persist_settings()
 
     def _refresh_map_list(self) -> None:
         names = self.store.list_map_names()
         self.map_combo["values"] = names
+
+    def _on_tts_backend_change(self, _: tk.Event[tk.Misc]) -> None:
+        backend = self.tts_backend_var.get().strip().lower()
+        if backend not in {"auto", "pyttsx3", "console"}:
+            self._show_error_banner(f"未知 TTS 后端: {backend}")
+            return
+        try:
+            self._announcer = Announcer(tts=create_tts(backend), stable_frames=2)
+        except Exception as exc:
+            self._show_error_banner(f"TTS 切换失败: {exc}")
+            return
+        self.status_var.set(f"已切换 TTS: {backend}")
+        self._clear_error_banner()
+        self._persist_settings()
+
+    def _on_source_mode_change(self, _: tk.Event[tk.Misc] | None) -> None:
+        mode = self.source_mode_var.get().strip().lower() or "mock"
+        if mode not in {"mock", "ndi", "capture"}:
+            mode = "mock"
+            self.source_mode_var.set(mode)
+        self._close_source()
+        self.source_status_var.set(f"未连接（当前模式: {mode}）")
+        self.source_button_text_var.set("连接源")
+        self.status_var.set("已切换源模式，点击“连接源”后生效")
+        self._clear_error_banner()
+        self._persist_settings()
+
+    def _on_source_entry_enter(self, _: tk.Event[tk.Misc]) -> None:
+        self._connect_source()
+
+    def _connect_source(self, auto: bool = False) -> None:
+        mode = self.source_mode_var.get().strip().lower()
+        source_text = self.source_text_var.get().strip()
+
+        self._close_source()
+        if auto and not source_text:
+            self.source_status_var.set(f"未连接（当前模式: {mode}）")
+            self.source_button_text_var.set("连接源")
+            self.status_var.set("编辑器已就绪，可在下方输入源并连接")
+            return
+
+        try:
+            self._source = _build_source(mode, source_text)
+        except Exception as exc:
+            self._source = None
+            self.source_status_var.set("连接失败")
+            self.source_button_text_var.set("重连源")
+            message = f"[{mode}] 连接失败: {exc}"
+            self._show_error_banner(message)
+            if not auto:
+                self.status_var.set("源连接失败，请修正参数后重试")
+            return
+
+        self._consecutive_read_failures = 0
+        self.source_status_var.set(f"已连接: {mode} / {source_text or '-'}")
+        self.source_button_text_var.set("重连源")
+        self._clear_error_banner()
+        self.status_var.set("源连接成功")
+        self._persist_settings()
+
+    def _close_source(self) -> None:
+        if self._source is None:
+            return
+        close = getattr(self._source, "close", None)
+        if callable(close):
+            close()
+        self._source = None
+        self._consecutive_read_failures = 0
+
+    def _handle_source_read_failure(self, message: str) -> None:
+        self._consecutive_read_failures += 1
+        attempt = self._consecutive_read_failures
+        threshold = self._read_failure_disconnect_threshold
+        if attempt >= threshold:
+            self._handle_source_error(f"{message}；连续失败 {attempt} 次，已自动断开，请点击“重连源”")
+            return
+
+        self.source_status_var.set(f"读取异常（{attempt}/{threshold}）")
+        self.source_button_text_var.set("重连源")
+        self._show_error_banner(f"{message}；可先重连或切换源模式")
+        self.status_var.set("源读取异常，编辑器仍可继续操作")
+
+    def _handle_source_error(self, message: str) -> None:
+        self._close_source()
+        self.source_status_var.set("已断开")
+        self.source_button_text_var.set("重连源")
+        self._show_error_banner(message)
+        self.status_var.set("源不可用，可切换到 mock 并重连")
+
+    def _show_error_banner(self, message: str) -> None:
+        self.error_banner_var.set(message)
+        self.error_banner.pack(fill=tk.X, padx=8)
+
+    def _clear_error_banner(self) -> None:
+        self.error_banner_var.set("")
+        self.error_banner.pack_forget()
+
+    def _persist_settings(self) -> None:
+        settings = AppSettings(
+            map_name=self.map_name_var.get().strip() or "de_dust2",
+            source_mode=self.source_mode_var.get().strip().lower() or "mock",
+            source=self.source_text_var.get().strip(),
+            tts_backend=self.tts_backend_var.get().strip().lower() or "auto",
+        )
+        self.settings_store.save(settings)
+
+
+def _build_source(mode: str, source_text: str) -> FrameSource:
+    normalized_mode = mode.strip().lower()
+    source = source_text.strip()
+
+    if normalized_mode == "mock":
+        if not source:
+            raise ValueError("mock 模式需要图片路径（可填 --image 或源输入框）")
+        return MockImageSource(source)
+
+    if normalized_mode == "ndi":
+        if not source:
+            raise ValueError("ndi 模式需要源文本（示例: ndi://OBS）")
+        return NDISource(source)
+
+    if normalized_mode == "capture":
+        if not source:
+            raise ValueError("capture 模式需要摄像头编号/视频路径/流地址")
+        cap_source: str | int = int(source) if source.isdigit() else source
+        return OpenCVCaptureSource(cap_source)
+
+    raise ValueError(f"未知 source mode: {mode}")
 
 
 def _bgr_to_photoimage(frame: np.ndarray) -> tk.PhotoImage:
@@ -347,18 +575,23 @@ def _bgr_to_photoimage(frame: np.ndarray) -> tk.PhotoImage:
 
 
 def run_region_editor(
-    source: FrameSource,
     maps_dir: str,
     map_name: str,
     fps: float,
+    source_mode: str,
+    source_text: str,
     tts_backend: str = "auto",
+    settings_path: str = "config/app_settings.yaml",
 ) -> None:
     """启动可视化区域编辑器。"""
     store = MapConfigStore(maps_dir)
+    settings_store = AppSettingsStore(settings_path)
     app = RegionEditorApp(
-        source=source,
         store=store,
+        settings_store=settings_store,
         initial_map=map_name,
+        initial_source_mode=source_mode,
+        initial_source_text=source_text,
         fps=fps,
         tts_backend=tts_backend,
     )
