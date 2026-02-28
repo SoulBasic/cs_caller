@@ -20,6 +20,7 @@ from cs_caller.preflight import PreflightReport, collect_preflight_report
 from cs_caller.region_editor import build_rect_region, normalize_rect, polygon_to_rect
 from cs_caller.runtime_helpers import autofill_source_text, build_operating_mode_hint
 from cs_caller.source_factory import build_source, map_source_factory_error
+from cs_caller.timeout_settings import read_gui_connect_timeout_ms
 from cs_caller.gui.connect_state import ConnectAttemptTracker, build_connect_controls
 from cs_caller.sources.base import (
     FrameSource,
@@ -93,7 +94,7 @@ class RegionEditorApp:
         self._connect_future: Future[FrameSource] | None = None
         self._connect_enable_detect_on_success = False
         self._connect_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="source-connect")
-        self._connect_timeout_ms = 3000
+        self._connect_timeout_ms = read_gui_connect_timeout_ms()
         self._is_closing = False
 
         self._build_layout()
@@ -572,7 +573,9 @@ class RegionEditorApp:
             lambda fut, token=attempt_id: self.root.after(0, self._on_connect_done, token, fut)
         )
         self.root.after(self._connect_timeout_ms, lambda token=attempt_id: self._on_connect_timeout(token))
-        self.source_status_var.set("连接中...")
+        self.source_status_var.set(
+            f"连接中...（超时 {self._connect_timeout_ms / 1000.0:.1f}s）"
+        )
         self._clear_error_banner()
         self._apply_connect_controls()
         self._refresh_preflight_and_quickstart()
@@ -627,11 +630,11 @@ class RegionEditorApp:
         self._connect_future = None
         self._connect_enable_detect_on_success = False
         timeout_s = self._connect_timeout_ms / 1000.0
-        message = f"连接超时（>{timeout_s:.1f}s），请确认 OBS/NDI 源在线后重试"
-        self.source_status_var.set("连接超时")
+        message = f"连接超时（{self._connect_timeout_ms}ms / {timeout_s:.1f}s），请确认 OBS/NDI 源在线后重试"
+        self.source_status_var.set(f"连接超时（{timeout_s:.1f}s）")
         self._last_connect_error = message
         self._show_error_banner(message)
-        self.status_var.set("连接超时，编辑器仍可继续使用")
+        self.status_var.set(f"连接超时（{timeout_s:.1f}s），编辑器仍可继续使用")
         self._apply_connect_controls()
         self._refresh_preflight_and_quickstart()
         self._update_operating_mode_hint()
