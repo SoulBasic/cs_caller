@@ -15,6 +15,7 @@ dependencies = [
   "numpy>=1.26",
   "opencv-python>=4.10",
   "PyYAML>=6.0",
+  "pyttsx3>=2.90",
 ]
 
 [project.optional-dependencies]
