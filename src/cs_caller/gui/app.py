@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
+import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Optional
@@ -18,6 +20,7 @@ from cs_caller.preflight import PreflightReport, collect_preflight_report
 from cs_caller.region_editor import build_rect_region, normalize_rect, polygon_to_rect
 from cs_caller.runtime_helpers import autofill_source_text, build_operating_mode_hint
 from cs_caller.source_factory import build_source, map_source_factory_error
+from cs_caller.gui.connect_state import ConnectAttemptTracker, build_connect_controls
 from cs_caller.sources.base import (
     FrameSource,
     SourceConnectError,
@@ -25,6 +28,10 @@ from cs_caller.sources.base import (
     SourceReadError,
 )
 from cs_caller.tts import create_tts
+
+
+class _ConnectCancelledError(RuntimeError):
+    """连接任务被取消或已超时。"""
 
 
 class RegionEditorApp:
@@ -81,6 +88,13 @@ class RegionEditorApp:
         self._read_failure_disconnect_threshold = 3
         self._last_connect_error: str = ""
         self._preflight_report: PreflightReport | None = None
+        self._connect_tracker = ConnectAttemptTracker()
+        self._connect_cancel_event: threading.Event | None = None
+        self._connect_future: Future[FrameSource] | None = None
+        self._connect_enable_detect_on_success = False
+        self._connect_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="source-connect")
+        self._connect_timeout_ms = 3000
+        self._is_closing = False
 
         self._build_layout()
         self.source_text_var.trace_add("write", self._on_source_text_change)
@@ -92,8 +106,11 @@ class RegionEditorApp:
             self._connect_source(auto=True)
 
     def _on_close(self) -> None:
+        self._is_closing = True
+        self._cancel_connect(show_status=False)
         self._close_source()
         self._persist_settings()
+        self._connect_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def _build_layout(self) -> None:
@@ -151,16 +168,25 @@ class RegionEditorApp:
         self.source_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 8))
         self.source_entry.bind("<Return>", self._on_source_entry_enter)
 
-        ttk.Button(
+        self.connect_button = ttk.Button(
             source_frame,
             textvariable=self.source_button_text_var,
             command=self._connect_source,
-        ).pack(side=tk.LEFT)
-        ttk.Button(
+        )
+        self.connect_button.pack(side=tk.LEFT)
+        self.cancel_connect_button = ttk.Button(
+            source_frame,
+            text="取消连接",
+            command=self._cancel_connect,
+            state=tk.DISABLED,
+        )
+        self.cancel_connect_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.connect_and_start_button = ttk.Button(
             source_frame,
             text="连接并开始播报",
             command=self._connect_and_start_detect,
-        ).pack(side=tk.LEFT, padx=(6, 0))
+        )
+        self.connect_and_start_button.pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(source_frame, textvariable=self.source_status_var).pack(side=tk.LEFT, padx=(12, 0))
 
@@ -217,6 +243,7 @@ class RegionEditorApp:
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self._apply_connect_controls()
 
     def run(self) -> None:
         self._tick_frame()
@@ -498,13 +525,14 @@ class RegionEditorApp:
         if mode not in {"mock", "ndi", "capture"}:
             mode = "mock"
             self.source_mode_var.set(mode)
+        self._cancel_connect(show_status=False)
         self._close_source()
         self._apply_source_autofill(mode)
         self.source_status_var.set(f"未连接（当前模式: {mode}）")
-        self.source_button_text_var.set("连接源")
         self.status_var.set("已切换源模式，点击“连接源”后生效")
         self._clear_error_banner()
         self._last_connect_error = ""
+        self._apply_connect_controls()
         self._refresh_preflight_and_quickstart()
         self._update_operating_mode_hint()
         self._persist_settings()
@@ -516,42 +544,153 @@ class RegionEditorApp:
         self._refresh_preflight_and_quickstart()
 
     def _connect_source(self, auto: bool = False, enable_detect_on_success: bool = False) -> None:
+        if self._connect_tracker.is_connecting:
+            return
+
         mode = self.source_mode_var.get().strip().lower()
         source_text = self._apply_source_autofill(mode)
 
         self._close_source()
         if auto and not source_text:
             self.source_status_var.set(f"未连接（当前模式: {mode}）")
-            self.source_button_text_var.set("连接源")
             self.status_var.set("编辑器已就绪，可在下方输入源并连接")
+            self._apply_connect_controls()
             self._update_operating_mode_hint()
             return
 
+        self._connect_enable_detect_on_success = enable_detect_on_success
+        attempt_id = self._connect_tracker.start()
+        cancel_event = threading.Event()
+        self._connect_cancel_event = cancel_event
+        self._connect_future = self._connect_executor.submit(
+            self._connect_source_worker,
+            mode,
+            source_text,
+            cancel_event,
+        )
+        self._connect_future.add_done_callback(
+            lambda fut, token=attempt_id: self.root.after(0, self._on_connect_done, token, fut)
+        )
+        self.root.after(self._connect_timeout_ms, lambda token=attempt_id: self._on_connect_timeout(token))
+        self.source_status_var.set("连接中...")
+        self._clear_error_banner()
+        self._apply_connect_controls()
+        self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
+        if auto:
+            self.status_var.set("正在自动连接源...")
+        else:
+            self.status_var.set("正在连接源，可继续编辑区域")
+        self._persist_settings()
+
+    def _cancel_connect(self, show_status: bool = True) -> None:
+        attempt_id = self._connect_tracker.cancel()
+        if attempt_id is None:
+            return
+        if self._connect_cancel_event is not None:
+            self._connect_cancel_event.set()
+        self._connect_cancel_event = None
+        self._connect_future = None
+        self._connect_enable_detect_on_success = False
+        self.source_status_var.set("连接已取消")
+        self._last_connect_error = "连接已取消"
+        self._show_error_banner("连接已取消，可修改源后重试")
+        self._apply_connect_controls()
+        self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
+        if show_status:
+            self.status_var.set("已取消连接，可立即重试")
+        self._persist_settings()
+
+    def _connect_source_worker(
+        self,
+        mode: str,
+        source_text: str,
+        cancel_event: threading.Event,
+    ) -> FrameSource:
+        if cancel_event.is_set():
+            raise _ConnectCancelledError("connect cancelled before start")
+        source = build_source(mode, source_text)
+        if cancel_event.is_set():
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+            raise _ConnectCancelledError("connect cancelled after source opened")
+        return source
+
+    def _on_connect_timeout(self, attempt_id: int) -> None:
+        if not self._connect_tracker.finish(attempt_id):
+            return
+        if self._connect_cancel_event is not None:
+            self._connect_cancel_event.set()
+        self._connect_cancel_event = None
+        self._connect_future = None
+        self._connect_enable_detect_on_success = False
+        timeout_s = self._connect_timeout_ms / 1000.0
+        message = f"连接超时（>{timeout_s:.1f}s），请确认 OBS/NDI 源在线后重试"
+        self.source_status_var.set("连接超时")
+        self._last_connect_error = message
+        self._show_error_banner(message)
+        self.status_var.set("连接超时，编辑器仍可继续使用")
+        self._apply_connect_controls()
+        self._refresh_preflight_and_quickstart()
+        self._update_operating_mode_hint()
+        self._persist_settings()
+
+    def _on_connect_done(self, attempt_id: int, future: Future[FrameSource]) -> None:
+        if self._is_closing:
+            try:
+                source = future.result()
+            except Exception:
+                return
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+            return
+
+        active = self._connect_tracker.finish(attempt_id)
+        self._connect_future = None
+        self._connect_cancel_event = None
         try:
-            self._source = build_source(mode, source_text)
+            source = future.result()
+        except _ConnectCancelledError:
+            self._apply_connect_controls()
+            return
         except Exception as exc:
+            if not active:
+                return
             self._source = None
             self.source_status_var.set("连接失败")
-            self.source_button_text_var.set("重连源")
-            message = map_source_factory_error(exc, mode=mode)
+            message = map_source_factory_error(exc, mode=self.source_mode_var.get().strip().lower())
             self._last_connect_error = message
             self._show_error_banner(message)
             self._refresh_preflight_and_quickstart()
             self._update_operating_mode_hint()
             self._persist_settings()
-            if not auto:
-                self.status_var.set("源连接失败，请修正参数后重试")
+            self.status_var.set("源连接失败，请修正参数后重试")
+            self._apply_connect_controls()
             return
 
+        if not active:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+            self._apply_connect_controls()
+            return
+
+        self._source = source
         self._consecutive_read_failures = 0
         self._last_connect_error = ""
+        mode = self.source_mode_var.get().strip().lower()
+        source_text = self.source_text_var.get().strip()
         self.source_status_var.set(f"已连接: {mode} / {source_text or '-'}")
-        self.source_button_text_var.set("重连源")
         self._clear_error_banner()
-        if enable_detect_on_success or self.detect_var.get():
+        if self._connect_enable_detect_on_success or self.detect_var.get():
             self._set_detect_enabled(True, persist=False)
         else:
             self.status_var.set("源连接成功")
+        self._connect_enable_detect_on_success = False
+        self._apply_connect_controls()
         self._refresh_preflight_and_quickstart()
         self._update_operating_mode_hint()
         self._persist_settings()
@@ -574,18 +713,19 @@ class RegionEditorApp:
             return
 
         self.source_status_var.set(f"读取异常（{attempt}/{threshold}）")
-        self.source_button_text_var.set("重连源")
         self._show_error_banner(f"{message}；可先重连或切换源模式")
         self.status_var.set("源读取异常，编辑器仍可继续操作")
+        self._apply_connect_controls()
         self._update_operating_mode_hint()
 
     def _handle_source_error(self, message: str) -> None:
+        self._cancel_connect(show_status=False)
         self._close_source()
         self.source_status_var.set("已断开")
-        self.source_button_text_var.set("重连源")
         self._last_connect_error = message
         self._show_error_banner(message)
         self.status_var.set("源不可用，可切换到 mock 并重连")
+        self._apply_connect_controls()
         self._refresh_preflight_and_quickstart()
         self._update_operating_mode_hint()
         self._persist_settings()
@@ -649,6 +789,22 @@ class RegionEditorApp:
         self._update_operating_mode_hint()
         if persist:
             self._persist_settings()
+
+    def _apply_connect_controls(self) -> None:
+        controls = build_connect_controls(
+            connecting=self._connect_tracker.is_connecting,
+            connected=self._source is not None,
+        )
+        self.source_button_text_var.set(controls.connect_button_text)
+        self.connect_button.config(
+            state=tk.NORMAL if controls.connect_enabled else tk.DISABLED
+        )
+        self.cancel_connect_button.config(
+            state=tk.NORMAL if controls.cancel_enabled else tk.DISABLED
+        )
+        self.connect_and_start_button.config(
+            state=tk.DISABLED if self._connect_tracker.is_connecting else tk.NORMAL
+        )
 
     def _update_operating_mode_hint(self) -> None:
         self.operating_mode_var.set(
