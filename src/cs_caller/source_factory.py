@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
+from cs_caller.ndi_handshake import DEFAULT_NDI_PROBE_TIMEOUT_S, run_ndi_probe_in_subprocess
 from cs_caller.preflight import check_ndi_backend_module_available, check_ndi_runtime_available
 from cs_caller.sources.base import FrameSource, OpenCVCaptureSource
 from cs_caller.sources.mock_source import MockImageSource
@@ -15,6 +18,17 @@ class SourceFactoryError(ValueError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _read_ndi_probe_timeout_s() -> float:
+    raw = os.getenv("CS_CALLER_NDI_PROBE_TIMEOUT_S", "").strip()
+    if not raw:
+        return DEFAULT_NDI_PROBE_TIMEOUT_S
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return DEFAULT_NDI_PROBE_TIMEOUT_S
+    return min(max(timeout, 0.5), 10.0)
 
 
 def build_source(mode: str, source_text: str) -> FrameSource:
@@ -55,6 +69,14 @@ def build_source(mode: str, source_text: str) -> FrameSource:
                 code="ndi_runtime_missing",
                 message=runtime_hint,
             )
+        probe_timeout_s = _read_ndi_probe_timeout_s()
+        probe = run_ndi_probe_in_subprocess(source, timeout_s=probe_timeout_s)
+        if not probe.ok:
+            code = "ndi_probe_timeout" if probe.timed_out else "ndi_probe_failed"
+            detail = probe.format_error()
+            if probe.discovered_names:
+                detail = f"{detail}；发现 {probe.discovered_count} 个源: {', '.join(probe.discovered_names)}"
+            raise SourceFactoryError(code=code, message=detail)
         try:
             return NDISource(source)
         except Exception as exc:
@@ -106,6 +128,8 @@ def map_source_factory_error(exc: Exception, *, mode: str) -> str:
             "capture_index_invalid": "采集编号错误",
             "ndi_backend_missing": "cyndilib 缺失",
             "ndi_runtime_missing": "NDI 运行库缺失",
+            "ndi_probe_timeout": "NDI 握手超时",
+            "ndi_probe_failed": "NDI 握手失败",
             "ndi_connect_failed": "NDI 连接失败",
             "capture_open_failed": "采集源打开失败",
         }

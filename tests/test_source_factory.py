@@ -1,5 +1,6 @@
 import pytest
 
+from cs_caller.ndi_handshake import NDIProbeResult
 from cs_caller.source_factory import (
     SourceFactoryError,
     build_source,
@@ -35,6 +36,26 @@ def test_source_factory_ndi_backend_module_missing(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(SourceFactoryError, match="请安装"):
         build_source("ndi", "ndi://OBS")
+
+
+def test_source_factory_ndi_probe_failure_keeps_discovered_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("cs_caller.source_factory.check_ndi_backend_module_available", lambda: (True, "ok"))
+    monkeypatch.setattr("cs_caller.source_factory.check_ndi_runtime_available", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        "cs_caller.source_factory.run_ndi_probe_in_subprocess",
+        lambda *_args, **_kwargs: NDIProbeResult(
+            ok=False,
+            error="未匹配到源",
+            selected_name="",
+            discovered_names=("OBS Studio", "DeskCam"),
+            discovered_count=2,
+        ),
+    )
+
+    with pytest.raises(SourceFactoryError) as exc_info:
+        build_source("ndi", "ndi://OBS")
+
+    assert "发现 2 个源: OBS Studio, DeskCam" in str(exc_info.value)
 
 
 def test_map_source_factory_error_uses_code_prefix() -> None:

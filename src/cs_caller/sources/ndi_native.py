@@ -42,6 +42,14 @@ class NDIConnectionErrorDetails:
         )
 
 
+@dataclass(frozen=True)
+class NDIHandshakeProbeResult:
+    """NDI discover/connect 探测结果。"""
+
+    selected: NDISourceInfo
+    discovered: tuple[NDISourceInfo, ...]
+
+
 def normalize_requested_source_text(source_text: str) -> str:
     """归一化用户输入：支持 OBS / ndi://OBS / 全名。"""
 
@@ -195,6 +203,77 @@ def _safe_decode(value: Any) -> str:
     return str(value)
 
 
+def _create_receiver_for_module(ndi_module: Any) -> Any:
+    receiver_cls = _resolve_first(ndi_module, ("Receiver", "receiver.Receiver"))
+    if not callable(receiver_cls):
+        return None
+    try:
+        return receiver_cls()
+    except TypeError:
+        # 兼容需要配置对象的版本
+        cfg_cls = _resolve_first(ndi_module, ("RecvCreate", "receiver.RecvCreate"))
+        if callable(cfg_cls):
+            return receiver_cls(cfg_cls())
+        raise
+
+
+def _set_receiver_source_and_connect(receiver: Any, selected: NDISourceInfo, timeout_ms: int) -> None:
+    set_source_fn = getattr(receiver, "set_source", None)
+    if callable(set_source_fn):
+        set_source_fn(selected.raw)
+    elif hasattr(receiver, "source"):
+        setattr(receiver, "source", selected.raw)
+    else:
+        raise SourceConnectError("cyndilib Receiver 缺少 set_source/source 接口")
+
+    connect_fn = getattr(receiver, "connect", None)
+    if callable(connect_fn):
+        try:
+            connect_fn()
+        except TypeError:
+            connect_fn(int(timeout_ms))
+
+
+def probe_ndi_handshake(
+    source_text: str,
+    *,
+    connect_timeout_ms: int = 1500,
+    ndi_module: Any | None = None,
+) -> NDIHandshakeProbeResult:
+    """执行一次 discover + connect 探测（用于短生命周期安全握手）。"""
+
+    ndi = ndi_module or _import_ndi_module()
+    init = _resolve_first(ndi, ("initialize", "ndi.initialize"))
+    if callable(init):
+        ok = bool(init())
+        if not ok:
+            raise SourceConnectError("NDI 初始化失败：请确认 NDI Runtime 已安装且可被 Python 进程加载")
+
+    timeout = max(200, int(connect_timeout_ms))
+    discovered = discover_ndi_sources(ndi, timeout_ms=timeout)
+    selected = select_best_ndi_source(source_text, discovered)
+    if selected is None:
+        detail = NDIConnectionErrorDetails(
+            requested=source_text,
+            normalized=normalize_requested_source_text(source_text),
+            discovered=tuple(discovered),
+        )
+        raise SourceConnectError(f"未匹配到 NDI 源。{detail.format_for_human()}")
+
+    receiver = _create_receiver_for_module(ndi)
+    if receiver is None:
+        raise SourceConnectError("NDI 接收器创建失败（Receiver 不可用）")
+
+    close_fn = getattr(receiver, "close", None)
+    try:
+        _set_receiver_source_and_connect(receiver, selected, timeout)
+    finally:
+        if callable(close_fn):
+            close_fn()
+
+    return NDIHandshakeProbeResult(selected=selected, discovered=tuple(discovered))
+
+
 class NDISource(FrameSource):
     """cyndilib NDI 接收源。"""
 
@@ -277,37 +356,14 @@ class NDISource(FrameSource):
         if receiver is None:
             raise SourceConnectError("NDI 接收器创建失败（Receiver 不可用）")
 
-        set_source_fn = getattr(receiver, "set_source", None)
-        if callable(set_source_fn):
-            set_source_fn(selected.raw)
-        elif hasattr(receiver, "source"):
-            setattr(receiver, "source", selected.raw)
-        else:
-            raise SourceConnectError("cyndilib Receiver 缺少 set_source/source 接口")
-
-        connect_fn = getattr(receiver, "connect", None)
-        if callable(connect_fn):
-            try:
-                connect_fn()
-            except TypeError:
-                connect_fn(int(self.connect_timeout_ms))
+        _set_receiver_source_and_connect(receiver, selected, self.connect_timeout_ms)
 
         self._receiver = receiver
         self._frame_sync = self._create_frame_sync(receiver)
         self._active_source = selected
 
     def _create_receiver(self) -> Any:
-        receiver_cls = _resolve_first(self._ndi, ("Receiver", "receiver.Receiver"))
-        if not callable(receiver_cls):
-            return None
-        try:
-            return receiver_cls()
-        except TypeError:
-            # 兼容需要配置对象的版本
-            cfg_cls = _resolve_first(self._ndi, ("RecvCreate", "receiver.RecvCreate"))
-            if callable(cfg_cls):
-                return receiver_cls(cfg_cls())
-            raise
+        return _create_receiver_for_module(self._ndi)
 
     def _create_frame_sync(self, receiver: Any) -> Any | None:
         framesync_cls = _resolve_first(
